@@ -1,0 +1,61 @@
+{% extends "core/base.html" %}
+
+{% block title %}Line Management Overview{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Line Management Overview</h1>
+    <p class="appraisal-sub">Every staff member's line-meeting engagement.</p>
+  </header>
+
+  {% include "overview/_filters.html" %}
+
+  {% if rows %}
+    <p class="appraisal-sub">
+      <strong>{{ counts.has_meetings }} of {{ total }}</strong> have meetings recorded
+      · {{ counts.no_meetings }} no meetings
+      {% if counts.no_manager %}· {{ counts.no_manager }} no manager{% endif %}
+    </p>
+
+    <table class="dashboard-table">
+      <thead>
+        <tr>
+          <th>Staff member</th>
+          <th>School</th>
+          <th>Line manager</th>
+          <th>Meetings</th>
+          <th>Status</th>
+          <th>Select</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>{{ row.member.email }}</td>
+            <td>{{ row.member.school|default:"—" }}</td>
+            <td>{{ row.member.line_manager_email|default:"—" }}</td>
+            <td>
+              {{ row.meeting_count }}{% if row.last_meeting %} · last {{ row.last_meeting }}{% endif %}
+            </td>
+            <td>
+              <span class="status-badge status-badge--{{ row.state }}">{{ row.label }}</span>
+            </td>
+            <td>
+              <a class="button button--small" href="{% url 'line_management:staff_meetings' staff_pk=row.member.pk %}">Open</a>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="reflection-card">
+      <div class="reflection-card-body">
+        {% if is_filtered %}
+          <p class="descriptor-text">No staff members match your filters.</p>
+        {% else %}
+          <p class="descriptor-text">No staff members have been added yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,84 @@
+{% extends "core/base.html" %}
+
+{% block title %}{% if is_new %}New line meeting{% else %}Line meeting{% endif %} — {{ member.email }}{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">{% if is_new %}New line meeting{% else %}Line meeting{% endif %}</h1>
+    <p class="appraisal-sub">
+      {{ member.email }}
+      {% if not is_new %} · {{ meeting.meeting_date }}{% if meeting.created_by_email %} · Recorded by {{ meeting.created_by_email }}{% endif %}{% endif %}
+      {% if role == 'manager' %} · You line-manage this person{% elif role == 'report' %} · This is your record{% endif %}
+    </p>
+  </header>
+
+  {% include "line_management/_messages.html" %}
+
+  {% if not can_edit %}
+    <ul class="messages"><li class="info">This record is read-only. Only the current line manager can edit it.</li></ul>
+  {% endif %}
+
+  <form method="post" action="{{ form_action }}">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+
+    <div class="reflection-card">
+      <div class="reflection-card-header">Meeting date</div>
+      <div class="reflection-card-body">
+        <div class="field-row">
+          <label for="{{ form.meeting_date.id_for_label }}">Date of meeting</label>
+          {{ form.meeting_date }}
+          {% if form.meeting_date.errors %}<div class="field-errors">{{ form.meeting_date.errors }}</div>{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="reflection-card">
+      <div class="reflection-card-header">Actions from the last meeting</div>
+      <div class="reflection-card-body">
+        <div class="field-row">{{ form.actions_from_last_meeting }}</div>
+      </div>
+    </div>
+
+    <div class="reflection-card">
+      <div class="reflection-card-header">Upcoming events / tasks / actions</div>
+      <div class="reflection-card-body">
+        <div class="field-row">
+          <span class="field-label">What / where / who / by when</span>
+          {{ form.upcoming }}
+        </div>
+      </div>
+    </div>
+
+    <div class="reflection-card">
+      <div class="reflection-card-header">Rotation update</div>
+      <div class="reflection-card-body">
+        <div class="field-row">
+          <span class="field-label">{{ rotation_guidance }}</span>
+          {{ form.rotation_update }}
+        </div>
+      </div>
+    </div>
+
+    <div class="reflection-card">
+      <div class="reflection-card-header">Main matters to discuss</div>
+      <div class="reflection-card-body">
+        <div class="field-row">{{ form.main_matters }}</div>
+      </div>
+    </div>
+
+    <div class="reflection-card">
+      <div class="reflection-card-header">Actions from this meeting</div>
+      <div class="reflection-card-body">
+        <div class="field-row">
+          <span class="field-label">What / by whom / by when (if not captured above)</span>
+          {{ form.actions_from_meeting }}
+        </div>
+      </div>
+    </div>
+
+    {% if can_edit %}
+      <div class="actions"><button type="submit">Save meeting</button></div>
+    {% endif %}
+  </form>
+{% endblock %}

@@ -1,0 +1,74 @@
+{% extends "core/base.html" %}
+
+{% block title %}My Team{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">My Team</h1>
+    <p class="appraisal-sub">Everyone you manage, and your role with each of them.</p>
+  </header>
+
+  {% include "team/_messages.html" %}
+
+  {% if rows %}
+    <table class="dashboard-table">
+      <thead>
+        <tr>
+          <th>Staff member</th>
+          <th>Department</th>
+          <th>Your role</th>
+          <th>Appraisal</th>
+          <th>Line meetings</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>{{ row.member.email }}</td>
+            <td>{{ row.member.department|default:"—" }}</td>
+            <td>
+              {% if row.is_coach %}<span class="status-badge">Coach</span>{% endif %}
+              {% if row.is_manager %}<span class="status-badge">Line manager</span>{% endif %}
+            </td>
+            <td>
+              {% if row.is_coach %}
+                {% if row.appraisal %}
+                  <div class="cell-stack">
+                    <span class="status-badge status-badge--{{ row.appraisal.status|lower }}">{{ row.appraisal.get_status_display }}</span>
+                    <a class="button button--small" href="{% url 'appraisals:detail' pk=row.appraisal.pk %}">Open</a>
+                  </div>
+                {% else %}
+                  Not started
+                {% endif %}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td>
+              {% if row.is_manager %}
+                <div class="cell-stack">
+                  <span class="cell-meta">{{ row.meeting_count }}{% if row.last_meeting %} · last {{ row.last_meeting }}{% endif %}</span>
+                  <a class="button button--small" href="{% url 'line_management:staff_meetings' staff_pk=row.member.pk %}">Open</a>
+                </div>
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td>
+              {% if row.is_manager %}
+                <a class="button button--small" href="{% url 'line_management:meeting_new' staff_pk=row.member.pk %}">New line meeting</a>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="reflection-card">
+      <div class="reflection-card-body">
+        <p class="descriptor-text">You don't manage anyone yet.</p>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

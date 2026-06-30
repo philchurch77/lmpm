@@ -1,0 +1,27 @@
+{% if previous %}
+  <p class="descriptor-text">Review of goals set in {{ previous.academic_year }}.</p>
+  {% for goal in previous.goals.all %}
+    <div class="reflection-card">
+      <div class="reflection-card-header">
+        Goal {{ goal.order }} — {{ goal.get_goal_type_display }}
+      </div>
+      <div class="reflection-card-body">
+        {% if goal.title %}<p class="descriptor-text">{{ goal.title|linebreaksbr }}</p>{% endif %}
+        <div class="readonly-field">
+          <span class="field-label">Review — teacher comments</span>
+          <p>{{ goal.teacher_review_comment|linebreaksbr|default:"—" }}</p>
+        </div>
+        <div class="readonly-field">
+          <span class="field-label">Review — coach comments</span>
+          <p>{{ goal.coach_review_comment|linebreaksbr|default:"—" }}</p>
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+{% else %}
+  <div class="reflection-card">
+    <div class="reflection-card-body">
+      <p class="descriptor-text">No previous appraisal on record.</p>
+    </div>
+  </div>
+{% endif %}

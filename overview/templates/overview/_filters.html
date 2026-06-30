@@ -1,0 +1,21 @@
+<form class="school-select" method="get">
+  <div class="form-field">
+    <label for="filter-school">School</label>
+    <select id="filter-school" name="school">
+      <option value="">All schools</option>
+      {% for school in schools %}
+        <option value="{{ school.pk }}" {% if selected_school == school.pk|stringformat:"s" %}selected{% endif %}>{{ school.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="form-field">
+    <label for="filter-q">Staff email</label>
+    <input type="search" id="filter-q" name="q" value="{{ query }}" placeholder="Search by email" />
+  </div>
+  <div class="form-actions">
+    {% if is_filtered %}
+      <a class="filter-clear" href="{{ request.path }}">Clear</a>
+    {% endif %}
+    <button type="submit">Apply</button>
+  </div>
+</form>

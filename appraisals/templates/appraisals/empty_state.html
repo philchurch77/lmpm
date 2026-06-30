@@ -1,0 +1,27 @@
+{% extends "core/base.html" %}
+
+{% block title %}My Appraisal{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">My Appraisal</h1>
+  </header>
+
+  {% include "appraisals/_messages.html" %}
+
+  <div class="reflection-card">
+    <div class="reflection-card-body">
+      {% if no_year %}
+        <p class="descriptor-text">There is no active appraisal cycle yet. Please check back once an academic year has been opened.</p>
+      {% elif needs_type %}
+        <p class="descriptor-text">Your staff record needs classifying as Teaching or Support before an appraisal can begin. Please contact an administrator.</p>
+      {% else %}
+        <p class="descriptor-text">You don't have an appraisal for {{ year }} yet.</p>
+        <form method="post" action="{% url 'appraisals:start_appraisal' %}">
+          {% csrf_token %}
+          <div class="actions"><button type="submit">Start my appraisal</button></div>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}

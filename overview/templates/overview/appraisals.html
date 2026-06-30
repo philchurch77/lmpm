@@ -1,0 +1,72 @@
+{% extends "core/base.html" %}
+
+{% block title %}Appraisals Overview{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Appraisals Overview</h1>
+    {% if year %}
+      <p class="appraisal-sub">Every staff member's appraisal status for {{ year }}.</p>
+    {% endif %}
+  </header>
+
+  {% if no_year %}
+    <div class="reflection-card">
+      <div class="reflection-card-body">
+        <p class="descriptor-text">No active appraisal cycle. Mark an academic year as current to populate this overview.</p>
+      </div>
+    </div>
+  {% else %}
+    {% include "overview/_filters.html" %}
+
+  {% if rows %}
+    <p class="appraisal-sub">
+      <strong>{{ counts.signed_off }} of {{ total }}</strong> signed off
+      · {{ counts.in_progress }} in progress
+      · {{ counts.not_started }} not started
+      {% if counts.not_classified %}· {{ counts.not_classified }} not classified{% endif %}
+    </p>
+
+    <table class="dashboard-table">
+      <thead>
+        <tr>
+          <th>Staff member</th>
+          <th>School</th>
+          <th>Department</th>
+          <th>Status</th>
+          <th>Select</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>{{ row.member.email }}</td>
+            <td>{{ row.member.school|default:"—" }}</td>
+            <td>{{ row.member.department|default:"—" }}</td>
+            <td>
+              <span class="status-badge status-badge--{{ row.state }}">{{ row.label }}</span>
+            </td>
+            <td>
+              {% if row.appraisal %}
+                <a class="button button--small" href="{% url 'appraisals:detail' pk=row.appraisal.pk %}">Open</a>
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="reflection-card">
+      <div class="reflection-card-body">
+        {% if is_filtered %}
+          <p class="descriptor-text">No staff members match your filters.</p>
+        {% else %}
+          <p class="descriptor-text">No staff members have been added yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+  {% endif %}
+{% endblock %}

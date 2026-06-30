@@ -1,0 +1,55 @@
+{% extends "core/base.html" %}
+
+{% load socialaccount %}
+
+{% block title %}Sign in{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Sign in</h1>
+  </header>
+
+  {% if messages %}
+    <ul class="messages">
+      {% for message in messages %}
+        <li class="{{ message.tags }}">{{ message }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <div class="login-wrap">
+    <p class="login-note">Use your organisation Microsoft account to sign in.</p>
+
+    {% with next_url=redirect_field_value|default:"/" %}
+      <a class="btn-primary" href="{% provider_login_url 'microsoft' process='login' next=next_url %}">
+        Sign in with Microsoft
+      </a>
+    {% endwith %}
+
+    <div class="login-divider">or</div>
+
+    <p class="login-note login-note--small">Sign in with email and password:</p>
+
+    <form method="post" action="{% url 'account_login' %}">
+      {% csrf_token %}
+
+      <div class="login-form-field">
+        <label for="id_login">Email</label>
+        {{ form.login }}
+      </div>
+
+      <div class="login-form-field">
+        <label for="id_password">Password</label>
+        {{ form.password }}
+      </div>
+
+      {% if redirect_field_value %}
+        <input type="hidden" name="{{ redirect_field_name }}" value="{{ redirect_field_value }}" />
+      {% endif %}
+
+      <div class="actions login-actions">
+        <button type="submit" class="btn-primary">Sign in</button>
+      </div>
+    </form>
+  </div>
+{% endblock %}

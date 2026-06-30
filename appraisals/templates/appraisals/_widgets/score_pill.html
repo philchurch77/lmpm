@@ -1,0 +1,15 @@
+{% comment %}
+Renders a RadioSelect field as a segmented Not Answered/1/2/3 score pill group.
+Expects: field (a BoundField using RadioSelect, choices "", "1", "2", "3").
+{% endcomment %}
+<div class="seg-group" role="radiogroup">
+  {% for radio in field %}
+    {% with val=radio.data.value %}
+    <label class="seg-pill{% if val == '1' %} seg-pill--score-1{% elif val == '2' %} seg-pill--score-2{% elif val == '3' %} seg-pill--score-3{% else %} seg-pill--clear{% endif %}">
+      {{ radio.tag }}
+      <span class="seg-pill-text">{{ radio.choice_label }}</span>
+    </label>
+    {% endwith %}
+  {% endfor %}
+</div>
+{% if field.errors %}<div class="field-errors">{{ field.errors }}</div>{% endif %}

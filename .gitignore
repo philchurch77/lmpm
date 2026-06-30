@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+antenv/
+ENV/
+
+# Django
+*.log
+local_settings.py
+staticfiles/
+# Keep user uploads out of git, but allow demo media assets.
+media/*
+!media/branding/
+!media/branding/**
+!media/school_logos/
+!media/school_logos/**
+db.sqlite3
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# VS Code
+.vscode/
+
+# Claude Code local (machine-specific permissions, not shared)
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db

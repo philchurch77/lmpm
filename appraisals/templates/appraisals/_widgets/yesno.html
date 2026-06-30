@@ -1,0 +1,15 @@
+{% comment %}
+Renders a RadioSelect field as a segmented Yes/No (or tri-state) pill group.
+Expects: field (a BoundField using RadioSelect).
+{% endcomment %}
+<div class="seg-group" role="radiogroup">
+  {% for radio in field %}
+    {% with val=radio.data.value %}
+    <label class="seg-pill{% if val == 'true' %} seg-pill--yes{% elif val == 'false' %} seg-pill--no{% else %} seg-pill--clear{% endif %}">
+      {{ radio.tag }}
+      <span class="seg-pill-text">{{ radio.choice_label }}</span>
+    </label>
+    {% endwith %}
+  {% endfor %}
+</div>
+{% if field.errors %}<div class="field-errors">{{ field.errors }}</div>{% endif %}

@@ -1,0 +1,71 @@
+<form method="post" action="{% url 'appraisals:self_review_save' pk=appraisal.pk %}">
+  {% csrf_token %}
+  {{ self_review_items.management_form }}
+  {{ self_review_items.non_form_errors }}
+  {{ self_review_bullets.management_form }}
+  {{ self_review_bullets.non_form_errors }}
+
+  {% if self_review.kind == 'SUPPORT' %}
+    <div class="reflection-card">
+      <div class="reflection-card-header">Job description</div>
+      <div class="reflection-card-body">
+        <div class="field-row">
+          <label for="{{ self_review_form.job_summary.id_for_label }}">Job summary</label>
+          {{ self_review_form.job_summary }}
+        </div>
+        <div class="field-row">
+          <label for="{{ self_review_form.level_description.id_for_label }}">Level description</label>
+          {{ self_review_form.level_description }}
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% for row in self_review_rows %}
+    <div class="reflection-card">
+      <div class="reflection-card-header">
+        {{ row.item_form.instance.heading|default:row.item_form.instance.code }}
+      </div>
+      <div class="reflection-card-body">
+        {{ row.item_form.id }}
+        {% for bullet_form in row.bullet_forms %}
+          <div class="field-row bullet-row">
+            {{ bullet_form.id }}
+            <p class="descriptor-text">{{ bullet_form.instance.text }}</p>
+            {% include "appraisals/_widgets/score_pill.html" with field=bullet_form.score %}
+          </div>
+        {% endfor %}
+        <div class="field-row">
+          <label for="{{ row.item_form.evidence.id_for_label }}">Evidence</label>
+          {{ row.item_form.evidence }}
+          {% if row.item_form.evidence.errors %}<div class="field-errors">{{ row.item_form.evidence.errors }}</div>{% endif %}
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+
+  {% if self_review.kind == 'TEACHING' %}
+    <div class="reflection-card">
+      <div class="reflection-card-header">Upper Pay Range declaration</div>
+      <div class="reflection-card-body">
+        <p class="descriptor-text">{{ upr_text }}</p>
+        <div class="field-row">
+          <span class="field-label">I agree to this declaration</span>
+          {% include "appraisals/_widgets/yesno.html" with field=self_review_form.upr_declaration_agreed %}
+        </div>
+        <div class="field-row">
+          <label for="{{ self_review_form.signed_name.id_for_label }}">Signed (name)</label>
+          {{ self_review_form.signed_name }}
+        </div>
+        <div class="field-row">
+          <label for="{{ self_review_form.signed_date.id_for_label }}">Date</label>
+          {{ self_review_form.signed_date }}
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if not locked %}
+    <div class="actions"><button type="submit">Save self-review</button></div>
+  {% endif %}
+</form>

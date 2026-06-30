@@ -1,0 +1,45 @@
+{% extends "core/base.html" %}
+
+{% block title %}Appraisal — {{ appraisal.teacher.email }}{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Appraisal</h1>
+    <p class="appraisal-sub">
+      {{ appraisal.teacher.email }} · {{ appraisal.academic_year }} ·
+      <span class="status-badge status-badge--{{ appraisal.status|lower }}">{{ appraisal.get_status_display }}</span>
+      {% if role == 'coach' %} · You are the coach{% elif role == 'teacher' %} · This is your appraisal{% endif %}
+    </p>
+  </header>
+
+  {% include "appraisals/_messages.html" %}
+
+  {% if locked %}
+    <ul class="messages"><li class="info">This appraisal is signed off and read-only.</li></ul>
+  {% endif %}
+
+  <div class="tabs" role="tablist">
+    <a class="tab" role="tab" data-tab="self-review" aria-selected="{% if active_tab == 'self-review' %}true{% else %}false{% endif %}" href="{% url 'appraisals:detail_tab' pk=appraisal.pk tab='self-review' %}">Self-review</a>
+    <a class="tab" role="tab" data-tab="last-year" aria-selected="{% if active_tab == 'last-year' %}true{% else %}false{% endif %}" href="{% url 'appraisals:detail_tab' pk=appraisal.pk tab='last-year' %}">Last Year</a>
+    <a class="tab" role="tab" data-tab="goals" aria-selected="{% if active_tab == 'goals' %}true{% else %}false{% endif %}" href="{% url 'appraisals:detail_tab' pk=appraisal.pk tab='goals' %}">Goals</a>
+    <a class="tab" role="tab" data-tab="summary" aria-selected="{% if active_tab == 'summary' %}true{% else %}false{% endif %}" href="{% url 'appraisals:detail_tab' pk=appraisal.pk tab='summary' %}">Summary</a>
+  </div>
+
+  <section class="tab-panel" id="panel-self-review" role="tabpanel" {% if active_tab != 'self-review' %}hidden{% endif %}>
+    {% include "appraisals/_tab_self_review.html" %}
+  </section>
+  <section class="tab-panel" id="panel-last-year" role="tabpanel" {% if active_tab != 'last-year' %}hidden{% endif %}>
+    {% include "appraisals/_tab_last_year.html" %}
+  </section>
+  <section class="tab-panel" id="panel-goals" role="tabpanel" {% if active_tab != 'goals' %}hidden{% endif %}>
+    {% include "appraisals/_tab_goals.html" %}
+  </section>
+  <section class="tab-panel" id="panel-summary" role="tabpanel" {% if active_tab != 'summary' %}hidden{% endif %}>
+    {% include "appraisals/_tab_summary.html" %}
+  </section>
+{% endblock %}
+
+{% block scripts %}
+  {% load static %}
+  <script defer src="{% static 'core/appraisal_tabs.js' %}?v=20260624-1"></script>
+{% endblock %}

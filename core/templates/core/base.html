@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Line & Performance Management{% endblock %}</title>
+    <meta name="theme-color" content="#304354" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    {% load static %}
+    <link rel="icon" type="image/svg+xml" href="{% static 'core/favicon.svg' %}" />
+    <link rel="stylesheet" href="{% static 'core/styles.css' %}?v=20260624-2" />
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    <header class="mobile-topbar">
+      <button class="mobile-nav-toggle" type="button" aria-expanded="false" aria-controls="sidebar" aria-label="Open menu">
+        <span class="mobile-nav-toggle-bar"></span>
+        <span class="mobile-nav-toggle-bar"></span>
+        <span class="mobile-nav-toggle-bar"></span>
+      </button>
+      <span class="mobile-topbar-title">OXLIP</span>
+    </header>
+    <div class="sidebar-backdrop" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+          {% if branding and branding.trust_emblem %}
+            <div class="trust-emblem-wrap">
+              <img class="trust-emblem" src="{{ branding.trust_emblem.url }}" alt="OXLIP trust emblem" decoding="async" />
+            </div>
+          {% endif %}
+          <div class="trust-name">OXLIP</div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %}>Home</a>
+          <a href="{% url 'appraisals:my_appraisal' %}" {% if '/appraisals/' in request.path %}aria-current="page"{% endif %}>My Appraisal</a>
+          <a href="{% url 'line_management:my_meetings' %}" {% if '/line-management/' in request.path and '/line-management/staff/' not in request.path %}aria-current="page"{% endif %}>My Line Meetings</a>
+          {% if user_is_coach or user_is_line_manager %}
+            <a href="{% url 'team:my_team' %}" {% if '/team/' in request.path or '/line-management/staff/' in request.path %}aria-current="page"{% endif %}>My Team</a>
+          {% endif %}
+        </nav>
+
+        <div class="nav-bottom">
+          {% if user.is_superuser %}
+            <a href="{% url 'overview:appraisals' %}" {% if '/overview/appraisals/' in request.path %}aria-current="page"{% endif %}>Appraisals Overview</a>
+            <a href="{% url 'overview:line_management' %}" {% if '/overview/line-management/' in request.path %}aria-current="page"{% endif %}>Line Management Overview</a>
+            <a href="/admin/" {% if '/admin/' in request.path %}aria-current="page"{% endif %}>Admin</a>
+          {% endif %}
+          {% if user.is_authenticated %}
+            <a href="/accounts/logout/" class="nav-signout">Sign out</a>
+          {% else %}
+            <a href="/accounts/login/" {% if '/accounts/login/' in request.path %}aria-current="page"{% endif %}>Sign in</a>
+          {% endif %}
+        </div>
+      </aside>
+
+      <div class="app-content">
+        <main>
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+
+    <script defer src="{% static 'core/word_limit.js' %}?v=20260624-1"></script>
+    <script defer src="{% static 'core/mobile_nav.js' %}?v=20260624-1"></script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

@@ -1,0 +1,74 @@
+{% extends "core/base.html" %}
+
+{% block title %}My Line Meetings{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">My Line Meetings</h1>
+    <p class="appraisal-sub">Records of your own line-management meetings (read-only), and meetings you host for the people you line-manage.</p>
+  </header>
+
+  {% include "line_management/_messages.html" %}
+
+  <section class="dashboard-section">
+    <h2 class="section-title">My meetings</h2>
+    {% if meetings %}
+      <table class="dashboard-table">
+        <thead>
+          <tr>
+            <th>Meeting date</th>
+            <th>Recorded by</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for meeting in meetings %}
+            <tr>
+              <td>{{ meeting.meeting_date }}</td>
+              <td>{{ meeting.created_by_email|default:"—" }}</td>
+              <td><a class="button button--small" href="{% url 'line_management:meeting_detail' pk=meeting.pk %}">Open</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="reflection-card">
+        <div class="reflection-card-body">
+          <p class="descriptor-text">You don't have any line-meeting records yet.</p>
+        </div>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="dashboard-section">
+    <h2 class="section-title">Meetings I host</h2>
+    {% if hosted_meetings %}
+      <table class="dashboard-table">
+        <thead>
+          <tr>
+            <th>Staff member</th>
+            <th>Meeting date</th>
+            <th>Recorded by</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for meeting in hosted_meetings %}
+            <tr>
+              <td>{{ meeting.staff.email }}{% if meeting.staff.department %} · {{ meeting.staff.department }}{% endif %}</td>
+              <td>{{ meeting.meeting_date }}</td>
+              <td>{{ meeting.created_by_email|default:"—" }}</td>
+              <td><a class="button button--small" href="{% url 'line_management:meeting_detail' pk=meeting.pk %}">Open</a></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="reflection-card">
+        <div class="reflection-card-body">
+          <p class="descriptor-text">You don't line-manage anyone with meeting records yet. Use <strong>My Team</strong> to start a meeting.</p>
+        </div>
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

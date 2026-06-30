@@ -1,0 +1,36 @@
+{% extends "core/base.html" %}
+
+{% block title %}Home{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Line & Performance Management</h1>
+  </header>
+
+  <section class="home-intro" aria-label="About this app">
+    <p>
+      Welcome. This is the starting point for the OXLIP line management and
+      performance management app.
+    </p>
+  </section>
+
+  <ul class="school-list">
+    {% for school in schools %}
+      <li class="school-card">
+        {% if school.logo %}
+          <img class="school-logo" src="{{ school.logo.url }}" alt="{{ school.name }} logo" loading="lazy" decoding="async" />
+        {% else %}
+          <div class="school-logo" aria-hidden="true"></div>
+        {% endif %}
+        <div>
+          <div class="school-name">{{ school.name }}</div>
+          {% if school.phase %}
+            <div class="school-meta">{{ school.get_phase_display }}</div>
+          {% endif %}
+        </div>
+      </li>
+    {% empty %}
+      <li>No schools found. Run <code>python manage.py seed_schools</code> to add them.</li>
+    {% endfor %}
+  </ul>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "core/base.html" %}
+
+{% block title %}Line meetings — {{ member.email }}{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Line meetings</h1>
+    <p class="appraisal-sub">{{ member.email }}{% if member.department %} · {{ member.department }}{% endif %}</p>
+  </header>
+
+  {% include "line_management/_messages.html" %}
+
+  <div class="actions">
+    <a class="button" href="{% url 'line_management:meeting_new' staff_pk=member.pk %}">New meeting</a>
+  </div>
+
+  {% if meetings %}
+    <table class="dashboard-table">
+      <thead>
+        <tr>
+          <th>Meeting date</th>
+          <th>Recorded by</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for meeting in meetings %}
+          <tr>
+            <td>{{ meeting.meeting_date }}</td>
+            <td>{{ meeting.created_by_email|default:"—" }}</td>
+            <td><a class="button button--small" href="{% url 'line_management:meeting_detail' pk=meeting.pk %}">Open</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="reflection-card">
+      <div class="reflection-card-body">
+        <p class="descriptor-text">No line-meeting records yet. Use “New meeting” to create the first one.</p>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,61 @@
+<form method="post" action="{% url 'appraisals:summary_save' pk=appraisal.pk %}">
+  {% csrf_token %}
+
+  <div class="reflection-card">
+    <div class="reflection-card-header">CPD &amp; comments</div>
+    <div class="reflection-card-body">
+      <div class="field-row">
+        <label for="{{ summary_form.cpd_requirements.id_for_label }}">CPD requirements to enable goal success</label>
+        {{ summary_form.cpd_requirements }}
+      </div>
+      <div class="field-row">
+        <label for="{{ summary_form.summary_teacher_comment.id_for_label }}">Teacher comments</label>
+        {{ summary_form.summary_teacher_comment }}
+      </div>
+      <div class="field-row">
+        <label for="{{ summary_form.summary_coach_comment.id_for_label }}">Coach comments</label>
+        {{ summary_form.summary_coach_comment }}
+      </div>
+    </div>
+  </div>
+
+  <div class="reflection-card">
+    <div class="reflection-card-header">Checks</div>
+    <div class="reflection-card-body">
+      <div class="field-row">
+        <span class="field-label">Is this teacher applying to be or is paid on the Upper Pay Range?</span>
+        {% include "appraisals/_widgets/yesno.html" with field=summary_form.on_upper_pay_range %}
+      </div>
+      <div class="field-row">
+        <span class="field-label">Has the appropriate Self-review Form been completed?</span>
+        {% include "appraisals/_widgets/yesno.html" with field=summary_form.self_review_form_completed %}
+      </div>
+      <div class="field-row">
+        <span class="field-label">Has the member of staff engaged with their own professional growth during this cycle?</span>
+        {% include "appraisals/_widgets/yesno.html" with field=summary_form.engaged_with_professional_growth %}
+      </div>
+    </div>
+  </div>
+
+  <div class="reflection-card">
+    <div class="reflection-card-header">Coach decisions</div>
+    <div class="reflection-card-body">
+      <div class="field-row">
+        <label for="{{ summary_form.coach_supports_pay_award.id_for_label }}">Does the Coach support a pay award for this member of staff this year?</label>
+        {{ summary_form.coach_supports_pay_award }}
+      </div>
+      <div class="field-row">
+        <span class="field-label">Does the coach feel a job description review should be undertaken?</span>
+        {% include "appraisals/_widgets/yesno.html" with field=summary_form.job_description_review_needed %}
+      </div>
+      <div class="field-row">
+        <label for="{{ summary_form.status.id_for_label }}">Status</label>
+        {{ summary_form.status }}
+      </div>
+    </div>
+  </div>
+
+  {% if not locked %}
+    <div class="actions"><button type="submit">Save summary</button></div>
+  {% endif %}
+</form>

@@ -1,0 +1,11 @@
+Django==6.0.5
+Pillow
+django-allauth
+django-storages[azure]
+whitenoise
+dj-database-url
+python-dotenv
+
+# Production server + Postgres driver (Linux/Azure)
+gunicorn; platform_system != "Windows"
+psycopg[binary]; platform_system != "Windows"

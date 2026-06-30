@@ -1,0 +1,41 @@
+<form method="post" action="{% url 'appraisals:goals_save' pk=appraisal.pk %}">
+  {% csrf_token %}
+  {{ goal_formset.management_form }}
+  {{ goal_formset.non_form_errors }}
+
+  {% for gform in goal_formset %}
+    <div class="reflection-card">
+      <div class="reflection-card-header">
+        Goal {{ gform.instance.order }} — {{ gform.instance.get_goal_type_display }}
+      </div>
+      <div class="reflection-card-body">
+        {{ gform.id }}
+        <div class="field-row">
+          <label for="{{ gform.title.id_for_label }}">Goal</label>
+          {{ gform.title }}
+          {% if gform.title.errors %}<div class="field-errors">{{ gform.title.errors }}</div>{% endif %}
+        </div>
+        <div class="field-row">
+          <label for="{{ gform.steps_to_success.id_for_label }}">Steps to success (3 minimum)</label>
+          {{ gform.steps_to_success }}
+        </div>
+        <div class="field-row">
+          <label for="{{ gform.success_criteria.id_for_label }}">Success criteria</label>
+          {{ gform.success_criteria }}
+        </div>
+        <div class="field-row">
+          <label for="{{ gform.teacher_review_comment.id_for_label }}">Review — teacher comments</label>
+          {{ gform.teacher_review_comment }}
+        </div>
+        <div class="field-row">
+          <label for="{{ gform.coach_review_comment.id_for_label }}">Review — coach comments</label>
+          {{ gform.coach_review_comment }}
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+
+  {% if not locked %}
+    <div class="actions"><button type="submit">Save goals</button></div>
+  {% endif %}
+</form>
