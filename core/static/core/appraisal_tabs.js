@@ -18,11 +18,31 @@
       }
     }
 
+    function currentDirtyForm() {
+      var visible = document.querySelector('.tab-panel:not([hidden])');
+      if (!visible) return null;
+      var form = visible.querySelector('form[data-warn-unsaved]');
+      if (!form || !window.UnsavedChanges || !window.UnsavedChanges.isDirty(form)) return null;
+      return form;
+    }
+
     tablist.addEventListener('click', function (event) {
       var tab = event.target.closest('.tab');
       if (!tab) return;
       event.preventDefault();
-      show(tab.getAttribute('data-tab'), tab.getAttribute('href'));
+      var name = tab.getAttribute('data-tab');
+      var href = tab.getAttribute('href');
+
+      var dirtyForm = currentDirtyForm();
+      if (dirtyForm) {
+        window.UnsavedChanges.confirmLeave(dirtyForm, {
+          onDiscard: function () {
+            show(name, href);
+          },
+        });
+        return;
+      }
+      show(name, href);
     });
   });
 })();

@@ -1,0 +1,74 @@
+{% extends "core/base.html" %}
+
+{% block title %}{{ batch.get_import_type_display }} import preview{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">{{ batch.get_import_type_display }} — {{ batch.original_filename }}</h1>
+    <p class="appraisal-sub">
+      Uploaded {{ batch.uploaded_at|date:"Y-m-d H:i" }} by {{ batch.uploaded_by }} ·
+      <span class="status-badge status-badge--{{ batch.status|lower }}">{{ batch.get_status_display }}</span>
+    </p>
+  </header>
+
+  <p class="appraisal-sub">
+    <strong>{{ batch.create_count }}</strong> to create
+    · <strong>{{ batch.update_count }}</strong> to update
+    · <strong>{{ batch.skip_count }}</strong> skipped
+  </p>
+
+  {% if batch.status == "PENDING" %}
+    <form method="post">
+      {% csrf_token %}
+      <div class="form-actions">
+        <button type="submit" name="action" value="discard">Discard — write nothing</button>
+        <button type="submit" name="action" value="confirm">Confirm — apply {{ batch.create_count|add:batch.update_count }} row(s)</button>
+      </div>
+    </form>
+  {% endif %}
+
+  <table class="dashboard-table">
+    <thead>
+      <tr>
+        <th>Row</th>
+        <th>Outcome</th>
+        <th>Details</th>
+        {% if batch.status == "CONFIRMED" %}<th>Result</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ row.row_number }}</td>
+          <td><span class="status-badge status-badge--{{ row.outcome|lower }}">{{ row.get_outcome_display }}</span></td>
+          <td>
+            {% if row.error_message %}
+              {{ row.error_message }}
+            {% elif batch.import_type == "STAFF" %}
+              {{ row.raw_json.email }}
+            {% elif batch.import_type == "LINE_MEETINGS" %}
+              {{ row.raw_json.staff_email }} · {{ row.raw_json.meeting_date }}
+            {% else %}
+              {{ row.raw_json.teacher_email }} · {{ row.raw_json.academic_year }}
+            {% endif %}
+          </td>
+          {% if batch.status == "CONFIRMED" %}
+            <td>
+              {% if row.created_object_pk %}
+                {{ row.created_object_model }} #{{ row.created_object_pk }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          {% endif %}
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if truncated %}
+    <p class="appraisal-sub">Showing the first {{ rows|length }} of {{ total_rows }} rows.</p>
+  {% endif %}
+
+  <p><a class="filter-clear" href="{% url 'data_import:hub' %}">Back to Bulk Import</a></p>
+{% endblock %}

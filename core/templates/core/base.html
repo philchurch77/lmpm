@@ -10,7 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     {% load static %}
     <link rel="icon" type="image/svg+xml" href="{% static 'core/favicon.svg' %}" />
-    <link rel="stylesheet" href="{% static 'core/styles.css' %}?v=20260624-2" />
+    <link rel="stylesheet" href="{% static 'core/styles.css' %}?v=20260630-1" />
     {% block head %}{% endblock %}
   </head>
   <body>
@@ -48,6 +48,7 @@
           {% if user.is_superuser %}
             <a href="{% url 'overview:appraisals' %}" {% if '/overview/appraisals/' in request.path %}aria-current="page"{% endif %}>Appraisals Overview</a>
             <a href="{% url 'overview:line_management' %}" {% if '/overview/line-management/' in request.path %}aria-current="page"{% endif %}>Line Management Overview</a>
+            <a href="{% url 'data_import:hub' %}" {% if '/import/' in request.path %}aria-current="page"{% endif %}>Bulk Import</a>
             <a href="/admin/" {% if '/admin/' in request.path %}aria-current="page"{% endif %}>Admin</a>
           {% endif %}
           {% if user.is_authenticated %}
@@ -60,6 +61,7 @@
 
       <div class="app-content">
         <main>
+          {% include "core/_messages.html" %}
           {% block content %}{% endblock %}
         </main>
       </div>
@@ -67,6 +69,7 @@
 
     <script defer src="{% static 'core/word_limit.js' %}?v=20260624-1"></script>
     <script defer src="{% static 'core/mobile_nav.js' %}?v=20260624-1"></script>
+    <script defer src="{% static 'core/unsaved_changes.js' %}?v=20260624-4"></script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

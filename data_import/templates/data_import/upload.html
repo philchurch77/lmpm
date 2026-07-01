@@ -1,0 +1,32 @@
+{% extends "core/base.html" %}
+
+{% block title %}Import {{ label }}{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Import — {{ label }}</h1>
+    <p class="appraisal-sub">
+      Upload a CSV file. Nothing is written until you review the preview and
+      confirm. See <code>docs/import_templates.md</code> for the required columns.
+    </p>
+  </header>
+
+  <div class="reflection-card">
+    <div class="reflection-card-body">
+      <form class="school-select" method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        <div class="form-field">
+          <label for="id_csv_file">CSV file</label>
+          {{ form.csv_file }}
+          {% if form.csv_file.errors %}
+            <p class="descriptor-text">{{ form.csv_file.errors|join:" " }}</p>
+          {% endif %}
+        </div>
+        <div class="form-actions">
+          <a class="filter-clear" href="{% url 'data_import:hub' %}">Cancel</a>
+          <button type="submit">Upload &amp; preview</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}

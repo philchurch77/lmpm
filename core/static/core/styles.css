@@ -6,9 +6,6 @@
   --colour-primary-dark: #22313f;
   --colour-primary-light: #eef3f6;
 
-  --colour-accent: #fff2a8;
-  --colour-accent-strong: #f4d95b;
-
   --colour-white: #ffffff;
   --colour-black: #111827;
 
@@ -309,7 +306,7 @@ a { color: inherit; }
 a.button, button {
   display: inline-block;
   padding: 8px 16px;
-  border: 2px solid var(--colour-primary-dark);
+  border: 1px solid var(--colour-primary-dark);
   background: var(--colour-surface);
   color: var(--colour-text);
   border-radius: var(--radius-md);
@@ -2194,6 +2191,12 @@ summary:focus-visible {
 .status-badge--has_meetings { background: var(--rag-green); color: var(--colour-white); }
 .status-badge--no_meetings { background: var(--rag-grey); color: var(--colour-white); }
 .status-badge--no_manager { background: var(--rag-amber); color: var(--colour-black); }
+.status-badge--create { background: var(--rag-green); color: var(--colour-white); }
+.status-badge--update { background: var(--rag-blue); color: var(--colour-white); }
+.status-badge--skip { background: var(--rag-amber); color: var(--colour-black); }
+.status-badge--pending { background: var(--rag-grey); color: var(--colour-white); }
+.status-badge--confirmed { background: var(--rag-green); color: var(--colour-white); }
+.status-badge--discarded { background: var(--rag-grey); color: var(--colour-white); }
 
 /* Tabs */
 .tabs {
@@ -2316,4 +2319,52 @@ summary:focus-visible {
 /* Fallback for browsers without :has() support */
 @supports not selector(:has(*)) {
   .seg-pill input:checked + .seg-pill-text { outline: 2px solid var(--colour-primary-dark); }
+}
+
+/* Unsaved-changes modal (in-app navigation we control, e.g. appraisal tabs) */
+.unsaved-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(34, 49, 63, 0.45);
+  padding: 16px;
+}
+
+.unsaved-modal {
+  width: 100%;
+  max-width: 480px;
+  background: var(--colour-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lift);
+  padding: 22px;
+}
+
+.unsaved-modal-title {
+  margin: 0 0 8px;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  font-size: 18px;
+  color: var(--colour-primary-dark);
+}
+
+.unsaved-modal-body {
+  margin: 0 0 18px;
+  color: var(--colour-muted);
+  font-size: 14px;
+}
+
+.unsaved-modal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.unsaved-modal-actions .button {
+  flex: 1 1 0;
+  padding-left: 10px;
+  padding-right: 10px;
+  text-align: center;
+  white-space: nowrap;
 }

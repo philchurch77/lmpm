@@ -13,6 +13,7 @@ urlpatterns = [
     path('line-management/', include('line_management.urls')),
     path('team/', include('team.urls')),
     path('overview/', include('overview.urls')),
+    path('import/', include('data_import.urls')),
 ]
 
 if settings.DEBUG or getattr(settings, "SERVE_MEDIA", False):

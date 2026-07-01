@@ -1,0 +1,68 @@
+{% extends "core/base.html" %}
+
+{% block title %}Bulk Import{% endblock %}
+
+{% block content %}
+  <header class="page-header">
+    <h1 class="page-title">Bulk Import</h1>
+    <p class="appraisal-sub">
+      Migrate staff and their history into LMPM via CSV. Run the steps in
+      order — each later step needs the data the earlier ones create.
+    </p>
+  </header>
+
+  <table class="dashboard-table">
+    <thead>
+      <tr>
+        <th>Step</th>
+        <th>Last upload</th>
+        <th>Status</th>
+        <th>Result</th>
+        <th>Upload</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for step in steps %}
+        <tr>
+          <td>{{ step.label }}</td>
+          <td>
+            {% if step.latest %}
+              {{ step.latest.original_filename }} — {{ step.latest.uploaded_at|date:"Y-m-d H:i" }}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            {% if step.latest %}
+              <span class="status-badge status-badge--{{ step.latest.status|lower }}">{{ step.latest.get_status_display }}</span>
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            {% if step.latest %}
+              {{ step.latest.create_count }} create · {{ step.latest.update_count }} update · {{ step.latest.skip_count }} skip
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td>
+            <a class="button button--small" href="{% url 'data_import:upload' slug=step.slug %}">Upload</a>
+            {% if step.latest %}
+              <a class="button button--small" href="{% url 'data_import:preview' batch_id=step.latest.pk %}">View last</a>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="reflection-card">
+    <div class="reflection-card-body">
+      <p class="descriptor-text">
+        See <code>docs/import_templates.md</code> in the repository for the
+        exact column headers each CSV needs.
+      </p>
+    </div>
+  </div>
+{% endblock %}

@@ -36,9 +36,11 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings           # delete legacy line meetings with no note content
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings --dry-run # preview what would be deleted
 
-# Tests (Django test runner; core/tests.py and appraisals/tests.py are currently empty/minimal)
+# Tests (Django test runner; core/tests.py is currently empty/minimal)
 .venv/Scripts/python.exe manage.py test                # all tests
 .venv/Scripts/python.exe manage.py test line_management  # one app (has a full role/IDOR test suite)
+.venv/Scripts/python.exe manage.py test appraisals       # one app (role/IDOR + self-review scoring test suite)
+.venv/Scripts/python.exe manage.py test data_import      # one app (bulk import gate + idempotency tests)
 .venv/Scripts/python.exe manage.py test core.tests.SomeTest.test_method   # a single test
 ```
 
@@ -67,6 +69,9 @@ single read-only "My Team" page. See "Team app" below.
 
 **`overview/`** — owns no models; superuser-only, trust-wide dashboards composed from the appraisals
 and line-management apps. See "Overview app" below.
+
+**`data_import/`** — superuser-only bulk CSV importer for migrating staff and historical PD data
+into the app. See "Bulk import app" below.
 
 ### Auth & authorization (the key design point)
 
@@ -114,10 +119,17 @@ signs off.
   review comments (teacher + coach), so the same goal is "This Year" when set and "Last Year" when
   reviewed. Types: STANDARDS/PERSONAL/LEADERSHIP. Goal 1's wording defaults to the module constant
   `DEFAULT_STANDARDS_GOAL`.
-- `SelfReview` (OneToOne with `Appraisal`) + `SelfReviewItem` (the Yes/No + Evidence rows). The
+- `SelfReview` (OneToOne with `Appraisal`) seeds a two-level descriptor tree via `seed_items()`:
+  `SelfReviewItem` is a TS-group/numbered-row container (`heading` + one shared `evidence` field per
+  group) and `SelfReviewBullet` (FK `self_review_item`, `related_name="bullets"`) is one individually
+  scorable descriptor statement within that group — `score` is `null` (Not Answered) or 1-3. The
   fixed Copleston descriptor content lives in `appraisals/self_review_templates.py`
-  (`TEACHING_ITEMS`, `SUPPORT_ITEMS`); `seed_items()` copies the set matching `kind` into rows.
-  **Seeding (`seed_goals`/`seed_items`) is called from views, never from `save()`.**
+  (`TEACHING_ITEMS`, `SUPPORT_ITEMS`, each a `(code, heading, bullets)` tuple); `seed_items()`
+  bulk-creates both levels matching `kind`. **Seeding (`seed_goals`/`seed_items`) is called from
+  views, never from `save()`.** Redesigned from a single per-group Yes/No `met` field to per-bullet
+  scoring; the old `met`/`descriptor` fields were dropped by migration without attempting to map
+  Yes/No answers onto per-bullet scores (there's no valid mapping) — see
+  `appraisals/migrations/0005_backfill_selfreviewbullets.py`.
 
 ### UI & access control
 - **Identity**: `appraisals/permissions.py` resolves the logged-in `User`'s role for an appraisal
@@ -127,11 +139,20 @@ signs off.
 - **Field-level gating is the security boundary, not template hiding**: forms
   (`appraisals/forms.py`) set `field.disabled=True` for fields the current role may not edit (Django
   then ignores any submitted value), and disable everything when `is_locked`. Teacher-owned vs
-  coach-owned fields are split there.
+  coach-owned fields are split there. The self-review `score` field (`SelfReviewBulletForm`) is
+  teacher-only like every other teacher-owned field — the coach can view but never edit it.
 - **Views** (`appraisals/views.py`, function-based, `@login_required`): one tabbed GET
   (`Self-review | Last Year | Goals | Summary`, panels rendered server-side so it works without JS)
-  plus per-section POST save endpoints (Post/Redirect/Get). Boolean fields render as Yes/No
-  segmented "pill" controls (reusing the `.rag-pill` CSS pattern), not iOS switches.
+  plus per-section POST save endpoints (Post/Redirect/Get). The self-review tab binds **two**
+  formsets in one `<form>` — `SelfReviewItemFormSet` (evidence; inline formset off `SelfReview`,
+  default prefix `items` derived from its FK's `related_name`) and `SelfReviewBulletFormSet` (score;
+  a flat `modelformset_factory` explicitly bound with `prefix="bullets"`, since `SelfReviewBullet`'s
+  parent is `SelfReviewItem` not `SelfReview` and `inlineformset_factory` only supports one FK hop).
+  The view zips the two formsets into per-group row dicts for the template (same "build rows in
+  Python" idiom as `team/views.py`). Boolean fields (and now the 4-state score field) render as
+  segmented "pill" controls reusing the `.seg-pill` CSS pattern
+  (`appraisals/templates/appraisals/_widgets/yesno.html` and its sibling `_widgets/score_pill.html`),
+  not iOS switches.
 - **Nav**: `appraisals/context_processors.py` exposes `user_is_coach` so `core/.../base.html` shows
   "My Team" (now the combined `team:my_team` page — see "Team app" below) for coaches **or** line
   managers. Mounted at `/appraisals/`.
@@ -139,6 +160,13 @@ signs off.
 ### Operational prerequisites
 Before anyone can start an appraisal: an `AcademicYear` must be marked `is_current`, the person needs
 a matching Django `User` (same email, for SSO) and a `StaffMember` with `staff_type` set.
+
+### Known follow-ups
+- `appraisals/tests.py` has a 28-test suite: the `get_appraisal_or_403` role matrix (incl. a
+  dedicated test for the coach-email *snapshot* vs. line-management's live lookup), self-review save
+  permissions for the per-bullet scoring, `seed_items()` correctness (item/bullet counts computed
+  from the template data itself), goals/summary field-level gating, and IDOR across every tab and
+  save endpoint. `core/tests.py` is the project's remaining empty test file.
 
 ## Line management app (`line_management/`)
 
@@ -200,8 +228,8 @@ The report needs a matching Django `User` (same email, for SSO) and a `StaffMemb
 - `line_management/tests.py` has a 34-test suite covering the role matrix (report/manager/super/
   stranger), the manager-change inheritance rule, case-insensitive email matching, the two-section
   `my_meetings` view, the create-on-save / empty-save-guard flow, and `is_empty` / the purge command.
-  `core/tests.py` and `appraisals/tests.py` are still empty/minimal — appraisals is the larger
-  remaining test gap given its snapshot-based authorization.
+  `appraisals/tests.py` has its own 28-test suite (see "Appraisals app" → "Known follow-ups" above);
+  `core/tests.py` is the project's remaining empty test file.
 - Any pre-existing blank records from the old "create-then-fill" flow can be cleared with
   `manage.py purge_empty_line_meetings` (`--dry-run` to preview first).
 - `_messages.html` / `no_staff.html` are now duplicated across `appraisals/`, `line_management/`,
@@ -235,6 +263,54 @@ login account, because surfacing who has **not** engaged is the point. The per-r
 the appraisals/line-management detail views' own `get_*_or_403` chokepoints (which treat a superuser
 as `ROLE_SUPER`), so these pages add no new read path.
 
+## Bulk import app (`data_import/`)
+
+Superuser-only CSV migration tool, mounted at `/import/`: lets an administrator bulk-load
+`StaffMember` rows and historical PD data (`Appraisal` summaries, `Goal`s, self-review
+scores/evidence, `LineMeeting`s) via five separate CSV uploads, each going through an
+**upload → preview → confirm** flow so nothing is written until a superuser reviews exactly what
+will change. The exact column contract for each of the five CSVs is in `docs/import_templates.md`.
+
+This is the one app that **does** own models for a purely administrative reason — `overview/` and
+`team/` deliberately own none, but an import audit trail (what was uploaded, what it would do, what
+it actually did) has to be persisted somewhere, and bolting it onto `overview/` would break that
+app's "read-only, no models" invariant. `ImportBatch` (one per upload, status
+PENDING/CONFIRMED/DISCARDED) and `ImportRow` (one per parsed CSV row, outcome
+CREATE/UPDATE/SKIP, the raw parsed row as JSON, and — once confirmed — which object it
+created/updated) are append-only: nothing is ever deleted, so the audit trail is permanent. Access is
+gated by `permissions.require_importer` (today identical to `overview`'s `_require_superuser`, but
+named for *what* it gates so a future narrower "data admin" role only changes one function).
+
+`services.py` holds all the parse/validate/apply logic (the first `services.py` in this codebase —
+justified here by five interdependent models and multi-step apply logic, not introduced casually).
+Four of the five import types upsert on a real model uniqueness constraint (teacher+year for
+`Appraisal`, item-code+order for `SelfReviewItem`/`SelfReviewBullet`, etc.), which makes re-running
+a batch naturally idempotent. `LineMeeting` has no such constraint (multiple genuine meetings can
+share a staff+date), so its dedupe instead hashes each row's natural fields
+(`ImportRow.source_row_hash`) and checks for a match against **every previous batch** of that import
+type, not just the current one — re-uploading the same export as a fresh batch updates the
+previously-created meeting instead of duplicating it.
+
+Self-review import is the trickiest case: one CSV row is one scorable bullet (`item_code` +
+`bullet_order`), and `confirm_batch` groups rows by `(teacher_email, academic_year)` so
+`SelfReview.seed_items()` runs exactly once per group (its own `transaction.atomic()` step) before
+any bullet in that group is applied — never per-row, since `seed_items()` bulk-creates the whole
+item+bullet tree in one shot and must not be interleaved with per-bullet updates. `evidence` is a
+shared per-item field on the real form, so it's only read from the row where `bullet_order == 1` for
+a given `item_code`.
+
+Every `apply_*` function runs inside its own `transaction.atomic()` block scoped to one logical unit
+of work (one row, or one self-review group's seed step) — never the whole file — so one bad row
+can't roll back hundreds of good ones. `confirm_batch` also **re-validates each row immediately
+before applying it**, not just at upload time, since real time passes between preview and confirm; a
+row that resolved fine at upload but fails at confirm (e.g. its `AcademicYear` was deleted in the
+interim) is recorded as a fresh `SKIP` with an error message rather than raising.
+
+### Known follow-ups
+- `data_import/tests.py` covers the superuser-only access gate, the create/update/skip-and-report
+  behaviour per import type, the self-review seed-once-per-group + evidence-on-bullet-order-1 rules,
+  and the cross-batch `LineMeeting` dedupe (the central idempotency guarantee of this feature).
+
 ## Configuration & deployment
 
 - `settings.py` reads everything from environment variables (loaded from a local `.env` in dev via
@@ -247,3 +323,8 @@ as `ROLE_SUPER`), so these pages add no new read path.
 - Full Azure deployment procedure (App Settings, startup command, Postgres vs SQLite rationale,
   SSO redirect URIs) is in `AZURE_DEPLOYMENT.md`. Media is served either from Azure Blob
   (`USE_AZURE_MEDIA_STORAGE=1`) or as WhiteNoise static (`MEDIA_AS_STATIC=1`).
+- The repo is published to GitHub (`github.com/philchurch77/lmpm`) but **not yet deployed to
+  Azure**. `.github/workflows/azure-deploy.yml` triggers on every push to `main` and will attempt a
+  real deploy the moment an `AZURE_WEBAPP_PUBLISH_PROFILE` secret is added to the repo — until then
+  pushes are GitHub-only. The workflow's `app-name: lmpm` is still a placeholder pending an actual
+  Azure App Service.

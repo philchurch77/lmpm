@@ -12,7 +12,6 @@
     </p>
   </header>
 
-  {% include "appraisals/_messages.html" %}
 
   {% if locked %}
     <ul class="messages"><li class="info">This appraisal is signed off and read-only.</li></ul>
@@ -41,5 +40,5 @@
 
 {% block scripts %}
   {% load static %}
-  <script defer src="{% static 'core/appraisal_tabs.js' %}?v=20260624-1"></script>
+  <script defer src="{% static 'core/appraisal_tabs.js' %}?v=20260624-2"></script>
 {% endblock %}

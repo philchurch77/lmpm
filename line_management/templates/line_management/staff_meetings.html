@@ -8,8 +8,6 @@
     <p class="appraisal-sub">{{ member.email }}{% if member.department %} · {{ member.department }}{% endif %}</p>
   </header>
 
-  {% include "line_management/_messages.html" %}
-
   <div class="actions">
     <a class="button" href="{% url 'line_management:meeting_new' staff_pk=member.pk %}">New meeting</a>
   </div>

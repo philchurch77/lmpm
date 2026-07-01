@@ -12,13 +12,11 @@
     </p>
   </header>
 
-  {% include "line_management/_messages.html" %}
-
   {% if not can_edit %}
     <ul class="messages"><li class="info">This record is read-only. Only the current line manager can edit it.</li></ul>
   {% endif %}
 
-  <form method="post" action="{{ form_action }}">
+  <form method="post" action="{{ form_action }}" data-warn-unsaved>
     {% csrf_token %}
     {{ form.non_field_errors }}
 

@@ -84,6 +84,7 @@ INSTALLED_APPS = [
     'line_management',
     'team',
     'overview',
+    'data_import',
 ]
 
 
