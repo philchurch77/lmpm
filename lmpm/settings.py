@@ -183,6 +183,15 @@ if not DEBUG:
 # Respect proxy headers for https detection (Azure App Service).
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+# Production-only transport security. Azure terminates TLS at its proxy; the
+# header above lets Django see the original scheme so the redirect can't loop.
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 3600  # raise (e.g. 31536000) once the deployment is proven
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # the app host has no subdomains; safe
+
 
 SITE_ID = 1
 
@@ -195,6 +204,10 @@ AUTHENTICATION_BACKENDS = (
 ACCOUNT_LOGIN_METHODS = {'email'}
 ACCOUNT_SIGNUP_FIELDS = ['email*', 'username*', 'password1*', 'password2*']
 ACCOUNT_EMAIL_VERIFICATION = 'none'
+# Accounts are pre-provisioned only: no self-signup (identity is by email, so
+# open signup would let anyone claim a staff email). The dangerous allauth
+# endpoints (signup, email management, password reset) are also 404'd in urls.py.
+ACCOUNT_ADAPTER = 'core.allauth_adapters.NoSignupAccountAdapter'
 
 SOCIALACCOUNT_QUERY_EMAIL = True
 SOCIALACCOUNT_AUTO_SIGNUP = False

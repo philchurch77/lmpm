@@ -33,11 +33,13 @@ if [ -f "$APP_ROOT/manage.py" ]; then
   python manage.py collectstatic --noinput || echo "Collectstatic failed (continuing)."
 fi
 
-# 4) Start gunicorn. --workers=1 is safe for SQLite; bump to 3 on Postgres.
+# 4) Start gunicorn. Production is Postgres, so multiple workers are safe;
+#    override via the WEB_CONCURRENCY app setting (use 1 if ever run on SQLite).
 echo "Starting gunicorn..."
 exec gunicorn \
   --chdir "$APP_ROOT" \
   --bind "0.0.0.0:${PORT:-8000}" \
+  --workers "${WEB_CONCURRENCY:-2}" \
   --timeout 600 \
   --env "DJANGO_SETTINGS_MODULE=$DJANGO_SETTINGS_MODULE" \
   "$WSGI_PATH"

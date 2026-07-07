@@ -2,6 +2,7 @@ from django.db import models
 
 from core.models import StaffMember
 
+from .leader_standards_templates import HEADTEACHER_STANDARDS
 from .self_review_templates import SUPPORT_ITEMS, TEACHING_ITEMS
 
 
@@ -329,3 +330,124 @@ class SelfReviewBullet(models.Model):
 
     def __str__(self):
         return f"{self.self_review_item} — bullet {self.order}"
+
+
+class LeaderReview(models.Model):
+    """A senior leader's (headteacher's) self-review against the Headteachers'
+    Standards, run as the leader's variant of the self-review section.
+
+    One per appraisal, seeded from `HEADTEACHER_STANDARDS`. Unlike `SelfReview`,
+    scoring is per-standard rather than per-bullet, and the review carries its
+    own free-form goals (`LeaderGoal`). Editing is governed by the parent
+    `Appraisal.is_locked`, exactly like `SelfReview`.
+    """
+
+    appraisal = models.OneToOneField(
+        Appraisal,
+        on_delete=models.CASCADE,
+        related_name="leader_review",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def seed_standards(self):
+        """Create the 10 standard rows for this review from the template.
+
+        No-op if standards already exist. Called from the create view, not from
+        save(). Goals start empty (added/removed in the UI).
+        """
+        if self.standards.exists():
+            return
+        LeaderStandard.objects.bulk_create(
+            [
+                LeaderStandard(
+                    leader_review=self,
+                    order=index + 1,
+                    number=number,
+                    title=title,
+                    descriptors="\n".join(descriptors),
+                )
+                for index, (number, title, descriptors) in enumerate(
+                    HEADTEACHER_STANDARDS
+                )
+            ]
+        )
+
+    def __str__(self):
+        return f"{self.appraisal} — Leadership self-review"
+
+
+class LeaderStandard(models.Model):
+    """One of the 10 Headteachers' Standards within a `LeaderReview`.
+
+    `descriptors` is a newline-joined snapshot of the read-only prompt
+    statements (not individually scored). The whole standard carries a single
+    `score` (Not Answered / 1-3), a "Not in Job Role" toggle and free-text
+    `examples`. When `not_applicable` is set the standard is excluded from
+    scoring, so `score` is forced to null on save.
+    """
+
+    leader_review = models.ForeignKey(
+        LeaderReview,
+        on_delete=models.CASCADE,
+        related_name="standards",
+    )
+    order = models.PositiveSmallIntegerField()
+    number = models.PositiveSmallIntegerField()
+    title = models.CharField(max_length=255)
+    descriptors = models.TextField(blank=True, default="")
+
+    score = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        choices=[(1, "1"), (2, "2"), (3, "3")],
+    )
+    not_applicable = models.BooleanField(default=False)
+    examples = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["order"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["leader_review", "number"],
+                name="unique_standard_number_per_leader_review",
+            ),
+        ]
+
+    @property
+    def descriptor_list(self):
+        """The read-only prompt statements as a list (for template rendering)."""
+        return [line for line in self.descriptors.split("\n") if line]
+
+    def save(self, *args, **kwargs):
+        # A standard marked "Not in Job Role" is never scored.
+        if self.not_applicable:
+            self.score = None
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.leader_review} — Standard {self.number}"
+
+
+class LeaderGoal(models.Model):
+    """A free-form goal arising from a leader's self-review.
+
+    Added/removed by the reviewee in the UI (no fixed set, unlike `Goal`).
+    """
+
+    leader_review = models.ForeignKey(
+        LeaderReview,
+        on_delete=models.CASCADE,
+        related_name="goals",
+    )
+    order = models.PositiveSmallIntegerField(default=0)
+    goal = models.TextField(blank=True, default="")
+    evidence_and_discussion = models.TextField(blank=True, default="")
+    achieved = models.BooleanField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["order", "pk"]
+
+    def __str__(self):
+        return f"{self.leader_review} — goal {self.pk}"

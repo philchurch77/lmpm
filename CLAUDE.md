@@ -94,7 +94,8 @@ non-superusers). There is no self-service signup.
   `email` plus `line_manager_email` and `performance_manager_email`. These manager links are stored
   **as emails, not foreign keys**, so a staff row can be imported before the manager's own record
   exists. Emails are normalised to lower case in `save()`. `school` is an FK to `School`.
-  `staff_type` (`TEACHING`/`SUPPORT`/blank) selects which self-review form applies.
+  `staff_type` (`TEACHING`/`SUPPORT`/`LEADER`/blank) selects which self-review form applies
+  (`LEADER` = senior leaders, who get the Headteacher-Standards variant — see "Appraisals app").
   **There is no FK from `StaffMember` to the Django `User`** — they are linked by matching email
   (case-insensitive). This is the identity model the whole app relies on.
 - `Branding` is a forced single-row table (always `pk=1`); the `branding` context processor exposes
@@ -130,6 +131,20 @@ signs off.
   scoring; the old `met`/`descriptor` fields were dropped by migration without attempting to map
   Yes/No answers onto per-bullet scores (there's no valid mapping) — see
   `appraisals/migrations/0005_backfill_selfreviewbullets.py`.
+- `LeaderReview` (OneToOne with `Appraisal`, `related_name="leader_review"`) — the **senior-leader
+  self-review variant**, seeded by `seed_standards()` from `appraisals/leader_standards_templates.py`
+  (`HEADTEACHER_STANDARDS`, a `(number, title, descriptors)` tuple list; plus static `ETHICS_CONTENT`
+  for Section 1, rendered read-only, never persisted). Deliberately a **separate model set** rather
+  than a third `SelfReview.Kind`, because the shape differs: scoring is **per-standard** not
+  per-bullet. `LeaderStandard` (FK `leader_review`, `related_name="standards"`) carries the whole
+  standard's `score` (`null`/1-3, same scale as `SelfReviewBullet`), a `not_applicable` ("Not in Job
+  Role") toggle, free-text `examples`, and a newline-joined `descriptors` snapshot (read-only prompts,
+  exposed as `descriptor_list`); `save()` forces `score=None` when `not_applicable` (so an N/A standard
+  is never scored regardless of the client-side greying). `LeaderGoal` (FK `leader_review`,
+  `related_name="goals"`) is a **free-form add/remove** goal (goal / evidence / tri-state `achieved`),
+  distinct from the fixed 3-goal `Goal`/Goals-tab. Seeding is called from views like the others. A
+  `StaffMember` with `staff_type=LEADER` gets this variant **instead of** `SelfReview` — the two are
+  never both created for one appraisal.
 
 ### UI & access control
 - **Identity**: `appraisals/permissions.py` resolves the logged-in `User`'s role for an appraisal
@@ -152,21 +167,39 @@ signs off.
   Python" idiom as `team/views.py`). Boolean fields (and now the 4-state score field) render as
   segmented "pill" controls reusing the `.seg-pill` CSS pattern
   (`appraisals/templates/appraisals/_widgets/yesno.html` and its sibling `_widgets/score_pill.html`),
-  not iOS switches.
+  not iOS switches. **The self-review tab has two variants**: `_build_section_forms` branches on
+  `_is_leader(staff)` (i.e. `staff_type == LEADER`) and builds **either** the teaching/support
+  item+bullet forms (above) **or** the leader forms — a single `LeaderStandardFormSet` (inline off
+  `LeaderReview`, so no bullet second-hop) plus a `LeaderGoalFormSet` (add/remove, `extra=1`,
+  `can_delete=True`, bound with explicit `prefix="leadergoals"` to avoid colliding with the
+  appraisal's own `goals` formset on the same page). `_tab_self_review.html` switches on the
+  `is_leader` context flag to include `_tab_leader_review.html`; `self_review_save` picks its
+  `form_keys` dynamically via `_self_review_form_keys` (same endpoint, same teacher-only gate). The
+  add/remove-goal rows and N/A greying are progressive enhancement (`core/static/core/leader_goals.js`,
+  loaded from `detail.html` only when `is_leader`); the server-rendered `extra=1` blank row is the
+  no-JS fallback.
 - **Nav**: `appraisals/context_processors.py` exposes `user_is_coach` so `core/.../base.html` shows
   "My Team" (now the combined `team:my_team` page — see "Team app" below) for coaches **or** line
   managers. Mounted at `/appraisals/`.
 
 ### Operational prerequisites
 Before anyone can start an appraisal: an `AcademicYear` must be marked `is_current`, the person needs
-a matching Django `User` (same email, for SSO) and a `StaffMember` with `staff_type` set.
+a matching Django `User` (same email, for SSO) and a `StaffMember` with `staff_type` set (`LEADER`
+for the Headteacher-Standards variant).
 
 ### Known follow-ups
-- `appraisals/tests.py` has a 28-test suite: the `get_appraisal_or_403` role matrix (incl. a
+- `appraisals/tests.py` has a 42-test suite: the `get_appraisal_or_403` role matrix (incl. a
   dedicated test for the coach-email *snapshot* vs. line-management's live lookup), self-review save
   permissions for the per-bullet scoring, `seed_items()` correctness (item/bullet counts computed
-  from the template data itself), goals/summary field-level gating, and IDOR across every tab and
-  save endpoint. `core/tests.py` is the project's remaining empty test file.
+  from the template data itself), goals/summary field-level gating, IDOR across every tab and
+  save endpoint, and the senior-leader variant (`seed_standards()` correctness, LEADER→`LeaderReview`
+  selection, the N/A-clears-score rule, goal add/delete, and the leader save role matrix).
+  `core/tests.py` is the project's remaining empty test file.
+- Senior-leader open items (deferred, not blocking): Section 1 (Ethics) is informational-only (no
+  sign-off control); there is no overall/average score roll-up across the 10 standards yet
+  (`not_applicable` is modelled so an N/A-excluding average can be added later); and a leader still
+  sees the appraisal's fixed **Goals** tab alongside the leader review's own Section-3 goals — hiding
+  the former for leaders is a possible follow-up.
 
 ## Line management app (`line_management/`)
 

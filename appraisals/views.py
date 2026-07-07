@@ -18,11 +18,14 @@ from core.models import StaffMember
 from .forms import (
     AppraisalSummaryForm,
     GoalFormSet,
+    LeaderGoalFormSet,
+    LeaderStandardFormSet,
     SelfReviewBulletFormSet,
     SelfReviewForm,
     SelfReviewItemFormSet,
 )
-from .models import AcademicYear, Appraisal, SelfReview, SelfReviewBullet
+from .leader_standards_templates import ETHICS_CONTENT
+from .models import AcademicYear, Appraisal, LeaderReview, SelfReview, SelfReviewBullet
 from .self_review_templates import UPR_DECLARATION_TEXT
 from core.identity import current_staff_member
 
@@ -41,6 +44,11 @@ def _can_edit_either(appraisal, role):
     )
 
 
+def _is_leader(staff):
+    """True when the staff member takes the senior-leader self-review variant."""
+    return bool(staff) and staff.staff_type == StaffMember.StaffType.LEADER
+
+
 def _ensure_self_review(appraisal, staff):
     """Get or create the appraisal's self-review and seed its items."""
     self_review = getattr(appraisal, "self_review", None)
@@ -53,6 +61,15 @@ def _ensure_self_review(appraisal, staff):
         self_review = SelfReview.objects.create(appraisal=appraisal, kind=kind)
     self_review.seed_items()
     return self_review
+
+
+def _ensure_leader_review(appraisal):
+    """Get or create the appraisal's leader self-review and seed its standards."""
+    leader_review = getattr(appraisal, "leader_review", None)
+    if leader_review is None:
+        leader_review = LeaderReview.objects.create(appraisal=appraisal)
+    leader_review.seed_standards()
+    return leader_review
 
 
 @login_required
@@ -104,18 +121,37 @@ def start_appraisal(request):
     )
     if created:
         appraisal.seed_goals()
-    _ensure_self_review(appraisal, staff)
+    if _is_leader(staff):
+        _ensure_leader_review(appraisal)
+    else:
+        _ensure_self_review(appraisal, staff)
     return redirect("appraisals:detail", pk=appraisal.pk)
 
 
-def _build_section_forms(appraisal, staff, role, *, section=None, data=None):
-    """Build forms/formsets for every tab; bind only ``section`` when posting."""
-    can_teacher = can_edit_teacher_fields(appraisal, role)
-    can_coach = can_edit_coach_fields(appraisal, role)
-    self_review = _ensure_self_review(appraisal, staff or appraisal.teacher)
+def _build_leader_self_review(appraisal, can_teacher, bound):
+    """Build the senior-leader self-review tab forms (standards + goals)."""
+    leader_review = _ensure_leader_review(appraisal)
+    return {
+        "is_leader": True,
+        "leader_review": leader_review,
+        "ethics_content": ETHICS_CONTENT,
+        "leader_standard_formset": LeaderStandardFormSet(
+            bound("self-review"),
+            instance=leader_review,
+            form_kwargs={"can_teacher": can_teacher, "can_coach": False},
+        ),
+        "leader_goal_formset": LeaderGoalFormSet(
+            bound("self-review"),
+            instance=leader_review,
+            prefix="leadergoals",
+            form_kwargs={"can_teacher": can_teacher, "can_coach": False},
+        ),
+    }
 
-    def bound(name):
-        return data if section == name else None
+
+def _build_standard_self_review(appraisal, staff, can_teacher, bound):
+    """Build the teaching/support self-review tab forms (items + bullets)."""
+    self_review = _ensure_self_review(appraisal, staff)
 
     self_review_items = SelfReviewItemFormSet(
         bound("self-review"),
@@ -143,6 +179,7 @@ def _build_section_forms(appraisal, staff, role, *, section=None, data=None):
     ]
 
     return {
+        "is_leader": False,
         "self_review": self_review,
         "self_review_form": SelfReviewForm(
             bound("self-review"), instance=self_review, can_teacher=can_teacher
@@ -150,6 +187,29 @@ def _build_section_forms(appraisal, staff, role, *, section=None, data=None):
         "self_review_items": self_review_items,
         "self_review_bullets": self_review_bullets,
         "self_review_rows": self_review_rows,
+    }
+
+
+def _build_section_forms(appraisal, staff, role, *, section=None, data=None):
+    """Build forms/formsets for every tab; bind only ``section`` when posting."""
+    can_teacher = can_edit_teacher_fields(appraisal, role)
+    can_coach = can_edit_coach_fields(appraisal, role)
+    staff = staff or appraisal.teacher
+
+    def bound(name):
+        return data if section == name else None
+
+    # The self-review tab renders the leader variant or the teaching/support
+    # variant; the Goals and Summary tabs (below) are the same for both.
+    if _is_leader(staff):
+        section_forms = _build_leader_self_review(appraisal, can_teacher, bound)
+    else:
+        section_forms = _build_standard_self_review(
+            appraisal, staff, can_teacher, bound
+        )
+
+    return {
+        **section_forms,
         "goal_formset": GoalFormSet(
             bound("goals"),
             instance=appraisal,
@@ -205,7 +265,8 @@ def _save_section(request, pk, section, can_check, form_keys, success_msg):
     forms_ctx = _build_section_forms(
         appraisal, staff, role, section=section, data=request.POST
     )
-    targets = [forms_ctx[key] for key in form_keys]
+    keys = form_keys(forms_ctx) if callable(form_keys) else form_keys
+    targets = [forms_ctx[key] for key in keys]
     if all(t.is_valid() for t in targets):
         for t in targets:
             t.save()
@@ -218,6 +279,13 @@ def _save_section(request, pk, section, can_check, form_keys, success_msg):
     return _render_detail(request, appraisal, role, forms_ctx, section)
 
 
+def _self_review_form_keys(forms_ctx):
+    """The forms to validate/save differ between the leader and standard tabs."""
+    if forms_ctx.get("is_leader"):
+        return ["leader_standard_formset", "leader_goal_formset"]
+    return ["self_review_form", "self_review_items", "self_review_bullets"]
+
+
 @login_required
 @require_POST
 def self_review_save(request, pk):
@@ -226,7 +294,7 @@ def self_review_save(request, pk):
         pk,
         "self-review",
         can_edit_teacher_fields,
-        ["self_review_form", "self_review_items", "self_review_bullets"],
+        _self_review_form_keys,
         "Self-review saved.",
     )
 

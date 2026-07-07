@@ -1,3 +1,6 @@
+{% if is_leader %}
+  {% include "appraisals/_tab_leader_review.html" %}
+{% else %}
 <form method="post" action="{% url 'appraisals:self_review_save' pk=appraisal.pk %}" data-warn-unsaved>
   {% csrf_token %}
   {{ self_review_items.management_form }}
@@ -69,3 +72,4 @@
     <div class="actions"><button type="submit">Save self-review</button></div>
   {% endif %}
 </form>
+{% endif %}

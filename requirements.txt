@@ -1,11 +1,14 @@
+# Pinned to the versions the app is developed and tested against, so the
+# Azure/Oryx build installs exactly what ran locally (django-allauth in
+# particular changes auth behaviour between releases).
 Django==6.0.5
-Pillow
-django-allauth
-django-storages[azure]
-whitenoise
-dj-database-url
-python-dotenv
+Pillow==12.2.0
+django-allauth==65.18.0
+django-storages[azure]==1.14.6
+whitenoise==6.12.0
+dj-database-url==3.1.2
+python-dotenv==1.2.2
 
 # Production server + Postgres driver (Linux/Azure)
-gunicorn; platform_system != "Windows"
-psycopg[binary]; platform_system != "Windows"
+gunicorn==26.0.0; platform_system != "Windows"
+psycopg[binary]==3.3.4; platform_system != "Windows"

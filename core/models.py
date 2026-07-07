@@ -47,6 +47,7 @@ class StaffMember(models.Model):
     class StaffType(models.TextChoices):
         TEACHING = "TEACHING", "Teaching"
         SUPPORT = "SUPPORT", "Support"
+        LEADER = "LEADER", "Senior leader"
 
     email = models.EmailField(unique=True)
     line_manager_email = models.EmailField(blank=True, default="")

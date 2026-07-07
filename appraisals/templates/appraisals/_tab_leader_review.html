@@ -1,0 +1,71 @@
+<form method="post" action="{% url 'appraisals:self_review_save' pk=appraisal.pk %}" data-warn-unsaved>
+  {% csrf_token %}
+  {{ leader_standard_formset.management_form }}
+  {{ leader_standard_formset.non_form_errors }}
+  {{ leader_goal_formset.management_form }}
+  {{ leader_goal_formset.non_form_errors }}
+
+  {# Section 1: Ethics and Professional Conduct — read-only reference text. #}
+  <div class="reflection-card">
+    <div class="reflection-card-header">Section 1 — Ethics and Professional Conduct</div>
+    <div class="reflection-card-body">
+      {% for heading, bullets in ethics_content %}
+        <p class="descriptor-lead">{{ heading }}</p>
+        <ul class="descriptor-list">
+          {% for bullet in bullets %}<li>{{ bullet }}</li>{% endfor %}
+        </ul>
+      {% endfor %}
+    </div>
+  </div>
+
+  {# Section 2: the 10 Headteacher's Standards, each scored as a whole. #}
+  <h2 class="section-heading">Section 2 — Headteacher's Standards</h2>
+  {% for sform in leader_standard_formset %}
+    <div class="reflection-card leader-standard" data-leader-standard>
+      <div class="reflection-card-header">
+        {{ sform.instance.number }}. {{ sform.instance.title }}
+      </div>
+      <div class="reflection-card-body">
+        {{ sform.id }}
+        <ul class="descriptor-list">
+          {% for descriptor in sform.instance.descriptor_list %}<li>{{ descriptor }}</li>{% endfor %}
+        </ul>
+        <div class="field-row">
+          <span class="field-label">Not in job role</span>
+          {% include "appraisals/_widgets/yesno.html" with field=sform.not_applicable %}
+        </div>
+        <div class="field-row leader-standard-score" data-leader-score>
+          <span class="field-label">Score</span>
+          {% include "appraisals/_widgets/score_pill.html" with field=sform.score %}
+        </div>
+        <div class="field-row">
+          <label for="{{ sform.examples.id_for_label }}">Examples</label>
+          {{ sform.examples }}
+          {% if sform.examples.errors %}<div class="field-errors">{{ sform.examples.errors }}</div>{% endif %}
+        </div>
+      </div>
+    </div>
+  {% endfor %}
+
+  {# Section 3: free-form goals (add / remove rows). #}
+  <h2 class="section-heading">Section 3 — Goals</h2>
+  <div class="leader-goals" data-formset data-prefix="leadergoals">
+    <div data-formset-rows>
+      {% for gform in leader_goal_formset %}
+        {% include "appraisals/_leader_goal_row.html" with gform=gform %}
+      {% endfor %}
+    </div>
+    {% if not locked %}
+      <div class="actions actions--row">
+        <button type="button" class="btn-secondary" data-formset-add>Add goal</button>
+      </div>
+      <template data-formset-empty>
+        {% include "appraisals/_leader_goal_row.html" with gform=leader_goal_formset.empty_form %}
+      </template>
+    {% endif %}
+  </div>
+
+  {% if not locked %}
+    <div class="actions"><button type="submit">Save self-review</button></div>
+  {% endif %}
+</form>

@@ -5,11 +5,25 @@ from django.contrib.auth.models import User
 from django.http import HttpRequest
 from django.shortcuts import redirect
 
+from allauth.account.adapter import DefaultAccountAdapter
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialLogin
 from allauth.core.exceptions import ImmediateHttpResponse
 
 from .models import SchoolProfile
+
+
+class NoSignupAccountAdapter(DefaultAccountAdapter):
+    """Local (password) accounts are pre-provisioned only — never self-signup.
+
+    Identity in this app is the user's email (see core/identity.py), so an open
+    signup form would let anyone claim a staff member's email and inherit their
+    access. The signup URL is also overridden to 404 in lmpm/urls.py; this
+    closes the door at the framework level as well.
+    """
+
+    def is_open_for_signup(self, request: HttpRequest) -> bool:
+        return False
 
 
 class RestrictMicrosoftLoginAdapter(DefaultSocialAccountAdapter):
@@ -20,6 +34,11 @@ class RestrictMicrosoftLoginAdapter(DefaultSocialAccountAdapter):
     - We authorize by checking the email exists as a Django User and has a
       SchoolProfile.
     """
+
+    def is_open_for_signup(self, request: HttpRequest, sociallogin: SocialLogin) -> bool:
+        # pre_social_login below always connects or denies, so the social
+        # signup form should be unreachable; keep it closed regardless.
+        return False
 
     def pre_social_login(self, request: HttpRequest, sociallogin: SocialLogin):
         email = (sociallogin.user.email or "").strip().lower()

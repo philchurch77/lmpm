@@ -21,7 +21,16 @@ from django.urls import reverse
 
 from core.models import StaffMember
 
-from .models import AcademicYear, Appraisal, SelfReview, SelfReviewBullet
+from .leader_standards_templates import HEADTEACHER_STANDARDS
+from .models import (
+    AcademicYear,
+    Appraisal,
+    LeaderGoal,
+    LeaderReview,
+    LeaderStandard,
+    SelfReview,
+    SelfReviewBullet,
+)
 from .self_review_templates import SUPPORT_ITEMS, TEACHING_ITEMS
 
 
@@ -63,6 +72,12 @@ def make_self_review(appraisal, *, kind=SelfReview.Kind.TEACHING):
     self_review = SelfReview.objects.create(appraisal=appraisal, kind=kind)
     self_review.seed_items()
     return self_review
+
+
+def make_leader_review(appraisal):
+    leader_review = LeaderReview.objects.create(appraisal=appraisal)
+    leader_review.seed_standards()
+    return leader_review
 
 
 class AppraisalRoleMatrixTests(TestCase):
@@ -695,3 +710,251 @@ class IDORAcrossSectionsTests(TestCase):
         url = reverse("appraisals:summary_save", args=[self.pk])
         response = self.client.post(url, {})
         self.assertEqual(response.status_code, 403)
+
+
+class SeedStandardsTests(TestCase):
+    """LeaderReview.seed_standards(): the 10 Headteacher Standards, seeded once."""
+
+    def setUp(self):
+        self.leader = make_staff(
+            "head@oxlip.test", staff_type=StaffMember.StaffType.LEADER
+        )
+        self.year = make_year()
+        self.appraisal = make_appraisal(self.leader, self.year)
+
+    # Catches the standard count drifting from the template constant.
+    def test_seed_creates_ten_standards(self):
+        leader_review = make_leader_review(self.appraisal)
+        self.assertEqual(leader_review.standards.count(), len(HEADTEACHER_STANDARDS))
+        self.assertEqual(leader_review.standards.count(), 10)
+
+    # Catches number/title/descriptor content or ordering drifting from the
+    # template tuples (e.g. an off-by-one in enumerate, or fields swapped).
+    def test_seed_round_trips_number_title_and_descriptors(self):
+        leader_review = make_leader_review(self.appraisal)
+        first_number, first_title, first_descriptors = HEADTEACHER_STANDARDS[0]
+        standard = leader_review.standards.get(number=first_number)
+        self.assertEqual(standard.order, 1)
+        self.assertEqual(standard.title, first_title)
+        self.assertEqual(standard.descriptor_list, list(first_descriptors))
+        self.assertIsNone(standard.score)
+        self.assertFalse(standard.not_applicable)
+
+    # Catches repeated _ensure_leader_review calls (every GET) duplicating rows.
+    def test_seed_called_twice_does_not_duplicate(self):
+        leader_review = make_leader_review(self.appraisal)
+        leader_review.seed_standards()
+        self.assertEqual(leader_review.standards.count(), 10)
+
+
+class LeaderReviewSelectionTests(TestCase):
+    """A LEADER staff member gets the leader variant, not a SelfReview."""
+
+    def setUp(self):
+        self.leader_email = "head@oxlip.test"
+        self.leader_user = make_user(self.leader_email)
+        self.leader = make_staff(
+            self.leader_email, staff_type=StaffMember.StaffType.LEADER
+        )
+        self.year = make_year()
+        self.appraisal = make_appraisal(self.leader, self.year)
+        self.detail_url = reverse(
+            "appraisals:detail_tab", args=[self.appraisal.pk, "self-review"]
+        )
+
+    # Catches the leader variant not rendering (falling back to the teaching
+    # self-review), and confirms the tab shows the standards content.
+    def test_leader_sees_headteacher_standards_tab(self):
+        self.client.force_login(self.leader_user)
+        response = self.client.get(self.detail_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Headteacher")
+        self.assertContains(response, "School Culture")
+
+    # Catches a SelfReview being created for a leader (the two variants must not
+    # both be seeded), and confirms the LeaderReview is created + seeded on GET.
+    def test_leader_get_builds_leader_review_not_self_review(self):
+        self.client.force_login(self.leader_user)
+        self.client.get(self.detail_url)
+        self.assertFalse(SelfReview.objects.filter(appraisal=self.appraisal).exists())
+        leader_review = LeaderReview.objects.get(appraisal=self.appraisal)
+        self.assertEqual(leader_review.standards.count(), 10)
+
+
+class LeaderReviewSaveTests(TestCase):
+    """Save permissions and behaviour for the senior-leader self-review."""
+
+    def setUp(self):
+        self.leader_email = "head@oxlip.test"
+        self.coach_email = "chair@oxlip.test"
+        self.stranger_email = "stranger@oxlip.test"
+
+        self.leader_user = make_user(self.leader_email)
+        self.coach_user = make_user(self.coach_email)
+        self.stranger_user = make_user(self.stranger_email)
+        self.super_user = make_user("admin@oxlip.test", is_superuser=True)
+
+        self.leader = make_staff(
+            self.leader_email,
+            performance_manager_email=self.coach_email,
+            staff_type=StaffMember.StaffType.LEADER,
+        )
+        make_staff(self.coach_email)
+        make_staff(self.stranger_email)
+
+        self.year = make_year()
+        self.appraisal = make_appraisal(
+            self.leader, self.year, coach_email=self.coach_email
+        )
+        self.leader_review = make_leader_review(self.appraisal)
+
+        self.detail_url = reverse(
+            "appraisals:detail_tab", args=[self.appraisal.pk, "self-review"]
+        )
+        self.save_url = reverse(
+            "appraisals:self_review_save", args=[self.appraisal.pk]
+        )
+
+    def _payload(self, *, score="2", examples="", na_index=None, goals=None):
+        """A full, valid POST payload for the standards + leader-goals formsets.
+
+        The standards inline formset uses the default prefix "standards"
+        (derived from LeaderReview.standards); the goals formset is bound with
+        the explicit prefix "leadergoals" in the view (to avoid colliding with
+        the appraisal's own "goals" formset on the same page). ``goals`` is a
+        list of field dicts; any dict carrying an "id" is treated as an existing
+        (INITIAL) row.
+        """
+        standards = list(self.leader_review.standards.order_by("order"))
+        payload = {
+            "standards-TOTAL_FORMS": str(len(standards)),
+            "standards-INITIAL_FORMS": str(len(standards)),
+            "standards-MIN_NUM_FORMS": "0",
+            "standards-MAX_NUM_FORMS": "1000",
+        }
+        for index, standard in enumerate(standards):
+            payload[f"standards-{index}-id"] = str(standard.pk)
+            payload[f"standards-{index}-score"] = score
+            payload[f"standards-{index}-not_applicable"] = (
+                "true" if na_index == index else "false"
+            )
+            payload[f"standards-{index}-examples"] = examples
+
+        goals = goals or []
+        initial = sum(1 for goal in goals if goal.get("id"))
+        payload.update(
+            {
+                "leadergoals-TOTAL_FORMS": str(len(goals)),
+                "leadergoals-INITIAL_FORMS": str(initial),
+                "leadergoals-MIN_NUM_FORMS": "0",
+                "leadergoals-MAX_NUM_FORMS": "1000",
+            }
+        )
+        for index, goal in enumerate(goals):
+            for field, value in goal.items():
+                payload[f"leadergoals-{index}-{field}"] = value
+        return payload
+
+    # Catches the leader's own scores/examples silently failing to persist.
+    def test_leader_can_save_scores_and_examples(self):
+        self.client.force_login(self.leader_user)
+        response = self.client.post(
+            self.save_url, self._payload(score="3", examples="Evidence here"), follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        standards = self.leader_review.standards.all()
+        self.assertTrue(all(s.score == 3 for s in standards))
+        self.assertTrue(all(s.examples == "Evidence here" for s in standards))
+
+    # Catches the "Not in Job Role" rule not clearing a submitted score — a
+    # standard marked N/A must never carry a score (model.save enforces this).
+    def test_not_applicable_clears_score_on_save(self):
+        self.client.force_login(self.leader_user)
+        response = self.client.post(
+            self.save_url, self._payload(score="3", na_index=0), follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        standards = list(self.leader_review.standards.order_by("order"))
+        self.assertTrue(standards[0].not_applicable)
+        self.assertIsNone(standards[0].score)
+        # The rest keep their score.
+        self.assertTrue(all(s.score == 3 for s in standards[1:]))
+
+    # Catches the leader being unable to add a free-form goal.
+    def test_leader_can_add_goal(self):
+        self.client.force_login(self.leader_user)
+        payload = self._payload(
+            goals=[
+                {
+                    "goal": "Improve attendance",
+                    "evidence_and_discussion": "Weekly tracking",
+                    "achieved": "false",
+                }
+            ]
+        )
+        response = self.client.post(self.save_url, payload, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.leader_review.goals.count(), 1)
+        goal = self.leader_review.goals.get()
+        self.assertEqual(goal.goal, "Improve attendance")
+        self.assertFalse(goal.achieved)
+
+    # Catches the can_delete path failing to remove a goal via the DELETE flag.
+    def test_leader_can_delete_goal(self):
+        goal = LeaderGoal.objects.create(
+            leader_review=self.leader_review, order=1, goal="Old goal"
+        )
+        self.client.force_login(self.leader_user)
+        payload = self._payload(
+            goals=[
+                {
+                    "id": str(goal.pk),
+                    "goal": "Old goal",
+                    "evidence_and_discussion": "",
+                    "achieved": "",
+                    "DELETE": "on",
+                }
+            ]
+        )
+        response = self.client.post(self.save_url, payload, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.leader_review.goals.count(), 0)
+
+    # Catches the coach being able to write into the leader's own fields.
+    def test_coach_cannot_save_leader_review(self):
+        self.client.force_login(self.coach_user)
+        response = self.client.post(self.save_url, self._payload(score="3"))
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(all(s.score is None for s in self.leader_review.standards.all()))
+
+    # Catches the score/na radios losing their disabled state for a coach GET.
+    def test_coach_sees_disabled_fields_on_get(self):
+        self.client.force_login(self.coach_user)
+        response = self.client.get(self.detail_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "disabled")
+
+    # Catches superuser oversight on the leader save path regressing.
+    def test_superuser_can_save_leader_review(self):
+        self.client.force_login(self.super_user)
+        response = self.client.post(
+            self.save_url, self._payload(score="1"), follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(s.score == 1 for s in self.leader_review.standards.all()))
+
+    # Catches IDOR on the leader write path.
+    def test_stranger_cannot_save_leader_review(self):
+        self.client.force_login(self.stranger_user)
+        response = self.client.post(self.save_url, self._payload(score="2"))
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(all(s.score is None for s in self.leader_review.standards.all()))
+
+    # Catches a signed-off leader appraisal remaining editable by the leader.
+    def test_leader_cannot_save_once_signed_off(self):
+        self.appraisal.status = Appraisal.Status.SIGNED_OFF
+        self.appraisal.save()
+        self.client.force_login(self.leader_user)
+        response = self.client.post(self.save_url, self._payload(score="3"))
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(all(s.score is None for s in self.leader_review.standards.all()))

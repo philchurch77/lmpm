@@ -2316,6 +2316,64 @@ summary:focus-visible {
   opacity: 0.7;
 }
 
+/* Senior-leader (Headteacher Standards) self-review */
+.section-heading {
+  margin: 28px 0 12px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--colour-heading);
+}
+
+.descriptor-lead {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--colour-heading);
+  line-height: 1.5;
+}
+
+.descriptor-list {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  font-size: 14px;
+  color: var(--colour-text);
+  line-height: 1.6;
+}
+.descriptor-list li { margin: 0 0 4px; }
+
+/* A standard marked "Not in job role" greys out its (disabled) score row. */
+.leader-standard.is-na .leader-standard-score {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.actions--row {
+  justify-content: flex-start;
+  margin-top: 12px;
+}
+
+.actions button.btn-secondary {
+  background: var(--colour-primary-light);
+  color: var(--colour-primary-dark);
+  border-color: var(--colour-primary-dark);
+}
+.actions button.btn-secondary:hover {
+  background: var(--colour-primary);
+  color: var(--colour-white);
+}
+
+.actions button.btn-link {
+  background: transparent;
+  border-color: transparent;
+  color: var(--rag-red);
+  padding: 6px 8px;
+  font-size: 13px;
+}
+.actions button.btn-link:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
 /* Fallback for browsers without :has() support */
 @supports not selector(:has(*)) {
   .seg-pill input:checked + .seg-pill-text { outline: 2px solid var(--colour-primary-dark); }
