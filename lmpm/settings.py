@@ -259,10 +259,14 @@ MEDIA_ROOT = BASE_DIR / "media"
 SERVE_MEDIA = _env_bool("SERVE_MEDIA", default=False)
 
 # Serve committed demo media via WhiteNoise under STATIC_URL when enabled.
+# collectstatic gathers media/ into staticfiles/media/ (via STATICFILES_DIRS
+# below) so WhiteNoise can serve it at /static/media/ — the URL MEDIA_URL points
+# at. Without the STATICFILES_DIRS entry the URL resolves to nothing (404).
 MEDIA_AS_STATIC = _env_bool("MEDIA_AS_STATIC", default=False)
 if MEDIA_AS_STATIC and not USE_AZURE_MEDIA_STORAGE:
     MEDIA_URL = f"{STATIC_URL}media/"
     SERVE_MEDIA = False
+    STATICFILES_DIRS = [("media", MEDIA_ROOT)]
 
 if USE_AZURE_MEDIA_STORAGE:
     AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME", "").strip()
