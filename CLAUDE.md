@@ -33,6 +33,7 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py seed_schools        # populate the trust's schools (idempotent)
 .venv/Scripts/python.exe manage.py seed_branding       # populate the single branding row (idempotent)
 .venv/Scripts/python.exe manage.py seed_testdata       # appraisals: a local test cohort (teacher/coach/head logins, all @test.local)
+.venv/Scripts/python.exe manage.py provision_users     # give imported StaffMembers a login: create matching User + SchoolProfile (idempotent; --dry-run to preview)
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings           # delete legacy line meetings with no note content
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings --dry-run # preview what would be deleted
 
@@ -303,6 +304,17 @@ Superuser-only CSV migration tool, mounted at `/import/`: lets an administrator 
 scores/evidence, `LineMeeting`s) via five separate CSV uploads, each going through an
 **upload → preview → confirm** flow so nothing is written until a superuser reviews exactly what
 will change. The exact column contract for each of the five CSVs is in `docs/import_templates.md`.
+
+**The importer creates `StaffMember` rows, not login accounts.** Because identity is by email with
+no FK between `StaffMember` and `User` (see "Auth & authorization"), imported staff cannot sign in
+until each also has a matching Django `User` + `SchoolProfile`. The required post-import step is
+`manage.py provision_users` (in `core/`; idempotent, `--dry-run` to preview), which creates a `User`
+(username/email = the staff email, unusable local password since auth is SSO-only) and a
+`SchoolProfile` (from `StaffMember.school`) for every `StaffMember` lacking one — skipping-and-
+reporting anyone with no `school` and never touching superusers. It must be run against the same
+database the import went into (i.e. the Azure DB for a production import, not local SQLite). No
+per-person permission setup follows: once `User` + `SchoolProfile` exist, the imported
+`line_manager_email` / `performance_manager_email` relationships drive all view/edit rights.
 
 This is the one app that **does** own models for a purely administrative reason — `overview/` and
 `team/` deliberately own none, but an import audit trail (what was uploaded, what it would do, what

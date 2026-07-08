@@ -129,3 +129,33 @@ A row where all five note columns are blank is skipped (matches
 The upload hub shows each step's status but does not hard-block running them
 out of order; rows that depend on missing data are skipped and reported
 rather than erroring the whole batch.
+
+## After importing: give staff a login (required)
+
+**The import creates `StaffMember` rows, not login accounts.** Identity in this
+app is by email with no FK between `StaffMember` and Django `User` (see
+`core/identity.py`), so imported staff cannot sign in until each email also has
+a matching `User` **and** a `SchoolProfile` (the SSO access gate — see
+`core/allauth_adapters.py`). Accounts are never auto-created on first login
+(`SOCIALACCOUNT_AUTO_SIGNUP = False`); everyone must be pre-provisioned.
+
+Run this **once after each import**, against the **same database the import went
+into** (e.g. the Azure Postgres DB, not local SQLite):
+
+```bash
+.venv/Scripts/python.exe manage.py provision_users --dry-run   # preview
+.venv/Scripts/python.exe manage.py provision_users             # create User + SchoolProfile
+```
+
+For every `StaffMember` it creates a `User` (username/email = the staff email,
+unusable local password since auth is SSO-only) and a `SchoolProfile` from
+`StaffMember.school`. It is idempotent (re-running provisions nobody new),
+skips-and-reports anyone with no `school` (the `SchoolProfile.school` FK is
+mandatory), and never touches a superuser. No per-person permission setup is
+needed: once the `User` + `SchoolProfile` exist, the email relationships already
+imported (`line_manager_email` / `performance_manager_email`) drive all
+view/edit rights automatically.
+
+Note the person's email must also exist as a real mailbox in the Microsoft
+(Entra) tenant — that is who actually authenticates them; `provision_users` only
+creates the app-side gate.
