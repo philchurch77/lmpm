@@ -958,3 +958,69 @@ class LeaderReviewSaveTests(TestCase):
         response = self.client.post(self.save_url, self._payload(score="3"))
         self.assertEqual(response.status_code, 403)
         self.assertTrue(all(s.score is None for s in self.leader_review.standards.all()))
+
+
+class StartAppraisalSelfClassifyTests(TestCase):
+    """An unclassified staff member can self-select Teaching/Support to start.
+
+    This removes the first-time dead-end where a provisioned-but-unclassified
+    staff member hit 'contact an administrator' with no way forward. The rule:
+    the posted staff_type only ever *fills a blank* (never overwrites), and only
+    TEACHING/SUPPORT are self-selectable (LEADER stays admin/import-only).
+    """
+
+    def setUp(self):
+        self.email = "newbie@oxlip.test"
+        self.user = make_user(self.email)
+        self.staff = make_staff(self.email)  # staff_type blank
+        self.year = make_year()
+        self.start_url = reverse("appraisals:start_appraisal")
+        self.client.force_login(self.user)
+
+    def test_blank_type_shows_choice_not_deadend(self):
+        response = self.client.get(reverse("appraisals:my_appraisal"))
+        self.assertContains(response, "Teaching")
+        self.assertContains(response, "Support")
+        self.assertContains(response, "Start my appraisal")
+
+    def test_posting_teaching_sets_type_and_seeds_self_review(self):
+        response = self.client.post(self.start_url, {"staff_type": "TEACHING"})
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.staff_type, StaffMember.StaffType.TEACHING)
+        appraisal = Appraisal.objects.get(teacher=self.staff, academic_year=self.year)
+        self.assertTrue(SelfReview.objects.filter(appraisal=appraisal).exists())
+        self.assertRedirects(
+            response, reverse("appraisals:detail", args=[appraisal.pk])
+        )
+
+    def test_posting_support_sets_support_type(self):
+        self.client.post(self.start_url, {"staff_type": "SUPPORT"})
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.staff_type, StaffMember.StaffType.SUPPORT)
+
+    # LEADER must not be self-selectable — it drives a different, admin-set form.
+    def test_posting_leader_is_rejected_and_type_stays_blank(self):
+        response = self.client.post(self.start_url, {"staff_type": "LEADER"})
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.staff_type, "")
+        self.assertFalse(Appraisal.objects.filter(teacher=self.staff).exists())
+        self.assertRedirects(response, reverse("appraisals:my_appraisal"))
+
+    def test_posting_garbage_is_rejected(self):
+        self.client.post(self.start_url, {"staff_type": "banana"})
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.staff_type, "")
+
+    def test_posting_no_type_is_rejected(self):
+        self.client.post(self.start_url, {})
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.staff_type, "")
+
+    # A staff member already classified must never have their type overwritten
+    # by a posted value (defence against a crafted POST changing the form used).
+    def test_existing_type_is_not_overwritten(self):
+        self.staff.staff_type = StaffMember.StaffType.SUPPORT
+        self.staff.save()
+        self.client.post(self.start_url, {"staff_type": "TEACHING"})
+        self.staff.refresh_from_db()
+        self.assertEqual(self.staff.staff_type, StaffMember.StaffType.SUPPORT)

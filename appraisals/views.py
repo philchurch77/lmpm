@@ -102,12 +102,22 @@ def start_appraisal(request):
     if staff is None:
         raise PermissionDenied("No staff record for your account.")
     if not staff.staff_type:
-        messages.error(
-            request,
-            "Your staff record needs classifying as Teaching or Support before an "
-            "appraisal can begin. Please contact an administrator.",
-        )
-        return redirect("appraisals:my_appraisal")
+        # Let an unclassified staff member self-select Teaching or Support inline
+        # (see empty_state.html) rather than dead-ending on "contact an admin".
+        # Only ever fills a blank; never overwrites an imported/admin value, and
+        # LEADER is deliberately not self-selectable (admin/import only).
+        chosen = (request.POST.get("staff_type") or "").strip().upper()
+        if chosen in (StaffMember.StaffType.TEACHING, StaffMember.StaffType.SUPPORT):
+            staff.staff_type = chosen
+            staff.save(update_fields=["staff_type"])
+        else:
+            messages.error(
+                request,
+                "Please choose whether you are Teaching or Support staff to begin. "
+                "If neither applies (for example you are a senior leader), please "
+                "contact an administrator.",
+            )
+            return redirect("appraisals:my_appraisal")
 
     year = AcademicYear.objects.filter(is_current=True).first()
     if year is None:

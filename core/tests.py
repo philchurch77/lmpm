@@ -13,18 +13,22 @@ Two layers enforce that and both are pinned here:
 """
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import User
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.contrib.sessions.middleware import SessionMiddleware
+from django.core.management import call_command
 from django.test import RequestFactory, TestCase
 
 from allauth.core.exceptions import ImmediateHttpResponse
 
+from appraisals.models import AcademicYear
+
 from .allauth_adapters import RestrictMicrosoftLoginAdapter
-from .models import School, SchoolProfile
+from .models import School, SchoolProfile, StaffMember
 
 
 def make_user(email, *, is_superuser=False, is_active=True):
@@ -187,3 +191,93 @@ class BlockedAccountEndpointTests(TestCase):
             {"login": "staff@oxlip.test", "password": "pw"},
         )
         self.assertEqual(response.status_code, 302)
+
+
+class CheckReadinessCommandTests(TestCase):
+    """The check_readiness audit surfaces the onboarding dead-ends that block a
+    smooth first login: no active year, unclassified staff, staff with no login,
+    logins with no staff record, and dangling manager links. Read-only.
+    """
+
+    def _run(self):
+        """Run the command, capturing stdout and whether it exited non-zero."""
+        out = io.StringIO()
+        blocked = False
+        try:
+            call_command("check_readiness", stdout=out)
+        except SystemExit:
+            blocked = True
+        return out.getvalue(), blocked
+
+    def _healthy_staff(self, email):
+        """A fully-provisioned, classified staff member with a login + profile."""
+        school = School.objects.create(name=f"School {email}")
+        user = make_user(email)
+        SchoolProfile.objects.create(user=user, school=school)
+        return StaffMember.objects.create(
+            email=email, staff_type=StaffMember.StaffType.TEACHING, school=school
+        )
+
+    def test_all_clean_passes(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        self._healthy_staff("ok@oxlip.test")
+        output, blocked = self._run()
+        self.assertFalse(blocked)
+        self.assertIn("All readiness checks passed", output)
+
+    def test_no_current_year_is_blocker(self):
+        self._healthy_staff("ok@oxlip.test")  # otherwise-clean data
+        output, blocked = self._run()
+        self.assertTrue(blocked)
+        self.assertIn("No active appraisal cycle", output)
+
+    def test_unclassified_staff_flagged(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        school = School.objects.create(name="S")
+        user = make_user("blank@oxlip.test")
+        SchoolProfile.objects.create(user=user, school=school)
+        StaffMember.objects.create(email="blank@oxlip.test", school=school)
+        output, blocked = self._run()
+        self.assertTrue(blocked)
+        self.assertIn("no staff_type", output)
+        self.assertIn("blank@oxlip.test", output)
+
+    def test_staff_without_login_flagged(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        school = School.objects.create(name="S")
+        StaffMember.objects.create(
+            email="nologin@oxlip.test",
+            staff_type=StaffMember.StaffType.TEACHING,
+            school=school,
+        )
+        output, blocked = self._run()
+        self.assertTrue(blocked)
+        self.assertIn("no login account", output)
+        self.assertIn("nologin@oxlip.test", output)
+
+    def test_login_without_staff_record_is_warning(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        make_user("orphan@oxlip.test")  # a User with no StaffMember
+        output, blocked = self._run()
+        # A warning, not a blocker — the command still exits zero.
+        self.assertFalse(blocked)
+        self.assertIn("no staff record", output)
+        self.assertIn("orphan@oxlip.test", output)
+
+    def test_dangling_manager_link_is_warning(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        self._healthy_staff("ok@oxlip.test")
+        StaffMember.objects.filter(email="ok@oxlip.test").update(
+            line_manager_email="ghost@oxlip.test"
+        )
+        output, blocked = self._run()
+        self.assertFalse(blocked)
+        self.assertIn("dangling manager link", output)
+        self.assertIn("ghost@oxlip.test", output)
+
+    def test_superuser_login_without_staff_is_not_flagged(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        make_user("admin@oxlip.test", is_superuser=True)
+        output, blocked = self._run()
+        self.assertFalse(blocked)
+        self.assertNotIn("admin@oxlip.test", output)

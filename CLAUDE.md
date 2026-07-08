@@ -34,10 +34,11 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py seed_branding       # populate the single branding row (idempotent)
 .venv/Scripts/python.exe manage.py seed_testdata       # appraisals: a local test cohort (teacher/coach/head logins, all @test.local)
 .venv/Scripts/python.exe manage.py provision_users     # give imported StaffMembers a login: create matching User + SchoolProfile (idempotent; --dry-run to preview)
+.venv/Scripts/python.exe manage.py check_readiness     # read-only audit of onboarding dead-ends (unclassified staff, no login, no active year, dangling manager links); non-zero exit on any blocker
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings           # delete legacy line meetings with no note content
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings --dry-run # preview what would be deleted
 
-# Tests (Django test runner; core/tests.py is currently empty/minimal)
+# Tests (Django test runner; every app has a suite — core covers the SSO auth gate + readiness command)
 .venv/Scripts/python.exe manage.py test                # all tests
 .venv/Scripts/python.exe manage.py test line_management  # one app (has a full role/IDOR test suite)
 .venv/Scripts/python.exe manage.py test appraisals       # one app (role/IDOR + self-review scoring test suite)
@@ -194,8 +195,10 @@ for the Headteacher-Standards variant).
   permissions for the per-bullet scoring, `seed_items()` correctness (item/bullet counts computed
   from the template data itself), goals/summary field-level gating, IDOR across every tab and
   save endpoint, and the senior-leader variant (`seed_standards()` correctness, LEADER→`LeaderReview`
-  selection, the N/A-clears-score rule, goal add/delete, and the leader save role matrix).
-  `core/tests.py` is the project's remaining empty test file.
+  selection, the N/A-clears-score rule, goal add/delete, and the leader save role matrix); plus the
+  first-time self-classify flow (an unclassified staff member self-selecting Teaching/Support to
+  start, LEADER never self-selectable, existing type never overwritten). `core/tests.py` covers the
+  SSO auth gate and the `check_readiness` command — no app is now without a test suite.
 - Senior-leader open items (deferred, not blocking): Section 1 (Ethics) is informational-only (no
   sign-off control); there is no overall/average score roll-up across the 10 standards yet
   (`not_applicable` is modelled so an N/A-excluding average can be added later); and a leader still
@@ -262,8 +265,8 @@ The report needs a matching Django `User` (same email, for SSO) and a `StaffMemb
 - `line_management/tests.py` has a 34-test suite covering the role matrix (report/manager/super/
   stranger), the manager-change inheritance rule, case-insensitive email matching, the two-section
   `my_meetings` view, the create-on-save / empty-save-guard flow, and `is_empty` / the purge command.
-  `appraisals/tests.py` has its own 28-test suite (see "Appraisals app" → "Known follow-ups" above);
-  `core/tests.py` is the project's remaining empty test file.
+  `appraisals/tests.py` has its own suite (see "Appraisals app" → "Known follow-ups" above);
+  `core/tests.py` covers the SSO auth gate and the `check_readiness` audit command.
 - Any pre-existing blank records from the old "create-then-fill" flow can be cleared with
   `manage.py purge_empty_line_meetings` (`--dry-run` to preview first).
 - `_messages.html` / `no_staff.html` are now duplicated across `appraisals/`, `line_management/`,
@@ -368,8 +371,18 @@ interim) is recorded as a fresh `SKIP` with an error message rather than raising
 - Full Azure deployment procedure (App Settings, startup command, Postgres vs SQLite rationale,
   SSO redirect URIs) is in `AZURE_DEPLOYMENT.md`. Media is served either from Azure Blob
   (`USE_AZURE_MEDIA_STORAGE=1`) or as WhiteNoise static (`MEDIA_AS_STATIC=1`).
-- The repo is published to GitHub (`github.com/philchurch77/lmpm`) but **not yet deployed to
-  Azure**. `.github/workflows/azure-deploy.yml` triggers on every push to `main` and will attempt a
-  real deploy the moment an `AZURE_WEBAPP_PUBLISH_PROFILE` secret is added to the repo — until then
-  pushes are GitHub-only. The workflow's `app-name: lmpm` is still a placeholder pending an actual
-  Azure App Service.
+- The repo is published to GitHub (`github.com/philchurch77/lmpm`) and **deployed live to Azure**
+  (App Service `lmpm`). `.github/workflows/azure-deploy.yml` triggers on every push to `main` and
+  deploys automatically via the `AZURE_WEBAPP_PUBLISH_PROFILE` secret — so `git push` to `main` is a
+  live deploy. Wait for the GitHub **Actions** run to go green before relying on the new code being
+  on the server.
+- **Running management commands on the live server (Azure SSH):** the deploy is an **Oryx compressed
+  build** — `/home/site/wwwroot` holds only `output.tar.zst` (+ `oryx-manifest.toml`,
+  `requirements.txt`, `hostingstart.html`), **not** the app code. At startup the package is extracted
+  to a temp dir and run from there, so `manage.py` lives under `/tmp/<hash>/`, not in `wwwroot`. To
+  run a command (e.g. `provision_users` after a bulk import): open App Service → Development Tools →
+  SSH, then `find / -name manage.py 2>/dev/null` to locate the extracted app root (or `which python`,
+  whose `antenv` parent is that root), `cd` there, and run `python manage.py <command>`. The
+  production `DATABASE_URL` is already in the process env, so the command hits the live Postgres. The
+  `/tmp/<hash>` path is regenerated on every deploy/restart — locate it fresh each time, never
+  hard-code it.

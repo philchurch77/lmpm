@@ -12,7 +12,17 @@
       {% if no_year %}
         <p class="descriptor-text">There is no active appraisal cycle yet. Please check back once an academic year has been opened.</p>
       {% elif needs_type %}
-        <p class="descriptor-text">Your staff record needs classifying as Teaching or Support before an appraisal can begin. Please contact an administrator.</p>
+        <p class="descriptor-text">Before you start, let us know which self-review applies to you.</p>
+        <form method="post" action="{% url 'appraisals:start_appraisal' %}">
+          {% csrf_token %}
+          <fieldset class="type-choice">
+            <legend class="descriptor-text">Are you Teaching or Support staff?</legend>
+            <label><input type="radio" name="staff_type" value="TEACHING" required /> Teaching</label>
+            <label><input type="radio" name="staff_type" value="SUPPORT" /> Support</label>
+          </fieldset>
+          <div class="actions"><button type="submit">Start my appraisal</button></div>
+        </form>
+        <p class="descriptor-text muted">If neither looks right (for example you are a senior leader), please contact an administrator.</p>
       {% else %}
         <p class="descriptor-text">You don't have an appraisal for {{ year }} yet.</p>
         <form method="post" action="{% url 'appraisals:start_appraisal' %}">

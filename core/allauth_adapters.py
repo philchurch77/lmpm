@@ -48,7 +48,11 @@ class RestrictMicrosoftLoginAdapter(DefaultSocialAccountAdapter):
         # Match an existing, pre-provisioned user.
         user = User.objects.filter(email__iexact=email, is_active=True).first()
         if user is None:
-            self._deny(request, "You are not authorised to use this service.")
+            self._deny(
+                request,
+                "You are not authorised to use this service yet. Please contact "
+                "your administrator to be set up with access.",
+            )
 
         # Superusers can access everything; they do not require a SchoolProfile.
         if user.is_superuser:
@@ -57,7 +61,11 @@ class RestrictMicrosoftLoginAdapter(DefaultSocialAccountAdapter):
 
         # Require a SchoolProfile (and schools are managed there).
         if not SchoolProfile.objects.filter(user=user).exists():
-            self._deny(request, "Your account is not configured with a school yet.")
+            self._deny(
+                request,
+                "Your account is not configured with a school yet. Please contact "
+                "your administrator to finish setting up your access.",
+            )
 
         # Link the social account to the existing user.
         sociallogin.connect(request, user)

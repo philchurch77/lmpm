@@ -8,6 +8,7 @@ layer (auth restriction, branding, schools) lives in the `core` app.
 
 from pathlib import Path
 import os
+import socket
 
 import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
@@ -52,13 +53,44 @@ ALLOWED_HOSTS = [h.strip() for h in _raw_allowed_hosts.split(",") if h.strip()]
 if DEBUG and not ALLOWED_HOSTS:
     ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 
-# Azure App Service exposes the public hostname via WEBSITE_HOSTNAME.
+# The trust's custom domain. Always trusted in production so a deploy is not
+# broken by a forgotten App Setting; still extendable via the ALLOWED_HOSTS env.
+_custom_domain = "lmpm.oxlip.uk"
+if not DEBUG and _custom_domain not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_custom_domain)
+
+# Azure App Service exposes the platform hostname (*.azurewebsites.net) via
+# WEBSITE_HOSTNAME. Keep it trusted too so the default URL and portal tools work.
 _azure_hostname = os.getenv("WEBSITE_HOSTNAME", "").strip()
+if _azure_hostname and _azure_hostname not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_azure_hostname)
+
+# Every public hostname needs a matching HTTPS CSRF origin: Django checks the
+# Origin/Referer on secure POSTs (the SSO callback and every form), so a host in
+# ALLOWED_HOSTS but missing here would fail CSRF. Derive them from the hosts we
+# trust, skipping the local-dev entries. (Built before the container IP is added
+# below, so no pointless https://169.254.x.x origin is generated.)
+CSRF_TRUSTED_ORIGINS = list(globals().get("CSRF_TRUSTED_ORIGINS", []))
+for _host in ALLOWED_HOSTS:
+    if _host in ("localhost", "127.0.0.1"):
+        continue
+    _origin = f"https://{_host}"
+    if _origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(_origin)
+
+# Azure's internal load-balancer/health probes reach the container on its private
+# link-local IP (169.254.x.x) with that IP as the Host header; without this they
+# raise DisallowedHost and can fail the warm-up check. Allow the container's own
+# IP(s) so the probes get a 200. Only meaningful on Azure (guarded on the
+# platform hostname), and kept out of CSRF_TRUSTED_ORIGINS above.
 if _azure_hostname:
-    if _azure_hostname not in ALLOWED_HOSTS:
-        ALLOWED_HOSTS.append(_azure_hostname)
-    _azure_origin = f"https://{_azure_hostname}"
-    CSRF_TRUSTED_ORIGINS = list(set(globals().get("CSRF_TRUSTED_ORIGINS", []) + [_azure_origin]))
+    try:
+        _, _, _container_ips = socket.gethostbyname_ex(socket.gethostname())
+        for _ip in _container_ips:
+            if _ip and _ip not in ALLOWED_HOSTS:
+                ALLOWED_HOSTS.append(_ip)
+    except OSError:
+        pass
 
 
 # Application definition
@@ -212,6 +244,11 @@ ACCOUNT_ADAPTER = 'core.allauth_adapters.NoSignupAccountAdapter'
 SOCIALACCOUNT_QUERY_EMAIL = True
 SOCIALACCOUNT_AUTO_SIGNUP = False
 SOCIALACCOUNT_ADAPTER = 'core.allauth_adapters.RestrictMicrosoftLoginAdapter'
+# Skip allauth's unstyled intermediate confirmation pages: go straight to
+# Microsoft on "Sign in" (instead of the "You are about to sign in…" page) and
+# straight to logout (instead of the "Are you sure you want to sign out?" page).
+SOCIALACCOUNT_LOGIN_ON_GET = True
+ACCOUNT_LOGOUT_ON_GET = True
 
 MICROSOFT_CLIENT_ID = os.getenv('MICROSOFT_CLIENT_ID', '')
 MICROSOFT_CLIENT_SECRET = os.getenv('MICROSOFT_CLIENT_SECRET', '')

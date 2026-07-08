@@ -22,7 +22,7 @@ Check each item and report pass/fail:
 4. **Migrations** — run `python manage.py migrate --check` to confirm no unapplied migrations
 5. **Static files** — confirm WhiteNoise is in `INSTALLED_APPS` and `MIDDLEWARE`
 6. **ALLOWED_HOSTS** — confirm it is not empty and handles the `WEBSITE_HOSTNAME` env var
-7. **Open TODOs** — grep `myproject/` for any `TODO`, `FIXME`, or `HACK` comments
+7. **Open TODOs** — grep `lmpm/` and the feature apps for any `TODO`, `FIXME`, or `HACK` comments
 
 ---
 

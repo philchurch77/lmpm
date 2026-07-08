@@ -14,6 +14,33 @@
     </p>
   </section>
 
+  <section class="get-started" aria-label="Get started">
+    <h2 class="section-title">Get started</h2>
+    <ul class="cta-list">
+      <li class="cta-card">
+        <a class="cta-link" href="{% url 'appraisals:my_appraisal' %}">
+          <span class="cta-title">My Appraisal</span>
+          <span class="cta-desc">Complete your self-review and goals for this year.</span>
+        </a>
+      </li>
+      <li class="cta-card">
+        <a class="cta-link" href="{% url 'line_management:my_meetings' %}">
+          <span class="cta-title">My Line Meetings</span>
+          <span class="cta-desc">View the notes from your line-management meetings.</span>
+        </a>
+      </li>
+      {% if user_is_coach or user_is_line_manager %}
+        <li class="cta-card">
+          <a class="cta-link" href="{% url 'team:my_team' %}">
+            <span class="cta-title">My Team</span>
+            <span class="cta-desc">Open appraisals and meetings for the people you manage.</span>
+          </a>
+        </li>
+      {% endif %}
+    </ul>
+  </section>
+
+  <h2 class="section-title">Schools in the trust</h2>
   <ul class="school-list">
     {% for school in schools %}
       <li class="school-card">
@@ -30,7 +57,11 @@
         </div>
       </li>
     {% empty %}
-      <li>No schools found. Run <code>python manage.py seed_schools</code> to add them.</li>
+      {% if user.is_superuser %}
+        <li>No schools found. Run <code>python manage.py seed_schools</code> to add them.</li>
+      {% else %}
+        <li>No schools have been set up yet.</li>
+      {% endif %}
     {% endfor %}
   </ul>
 {% endblock %}

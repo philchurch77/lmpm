@@ -1,5 +1,12 @@
 # The Gauntlet — Pupil Data Review
 
+> **Note — carried over from the sibling OSED project.** This workflow targets
+> apps that do **not** exist in LMPM (`tolerance`, `sdq`, `flashcards`,
+> `evaluation`) and an OpenAI integration LMPM does not have. It will not run
+> meaningfully here as written. For an LMPM review use **`/fitness-review`**
+> (which runs Victor for the security/GDPR pass); keep this file only if you
+> intend to re-tailor it to LMPM's staff-data model.
+
 You are running The Gauntlet: the mandatory review for any change that touches pupil data, permissions, or the AI apps.
 
 This workflow exists because this platform holds Article 9 special category data about children in care — names, emotional states, observed behaviours. No change to the `tolerance` app, `sdq` app, `flashcards`, or `evaluation` apps ships without passing this workflow.

@@ -8,6 +8,6 @@ Check the following and report a clear pass/fail for each:
 4. **Migrations** — run `python manage.py migrate --check` to confirm no unapplied migrations
 5. **Static files** — confirm whitenoise is in INSTALLED_APPS and MIDDLEWARE
 6. **ALLOWED_HOSTS** — confirm it's not empty and handles the WEBSITE_HOSTNAME env var
-7. **Open TODOs** — grep for any TODO/FIXME/HACK comments in the myproject/ directory
+7. **Open TODOs** — grep for any TODO/FIXME/HACK comments in the `lmpm/` package and the feature apps
 
 Finish with a one-line verdict: **Ready to deploy** or **Fix before deploying**, listing any failures.
