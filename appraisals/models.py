@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.db import models
 
 from core.models import StaffMember
@@ -36,6 +38,29 @@ class AcademicYear(models.Model):
                 is_current=False
             )
         super().save(*args, **kwargs)
+
+    @classmethod
+    def start_next(cls):
+        """Create (if needed) the year after the current one and make it current.
+
+        Advances the trust to the next academic year in one step: the new year's
+        ``save()`` demotes whatever was previously current. Anchored on the
+        *current* year (not merely the latest), so a pre-created future year is
+        activated rather than skipped or duplicated. Falls back to the latest
+        year + 1, or the current calendar year when the table is empty.
+
+        Returns ``(year, created)``.
+        """
+        current = cls.objects.filter(is_current=True).first()
+        if current:
+            next_start = current.start_year + 1
+        else:
+            latest = cls.objects.order_by("-start_year").first()
+            next_start = latest.start_year + 1 if latest else date.today().year
+        year, created = cls.objects.get_or_create(start_year=next_start)
+        year.is_current = True
+        year.save()
+        return year, created
 
     def __str__(self):
         if self.label:

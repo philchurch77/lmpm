@@ -35,6 +35,7 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py seed_testdata       # appraisals: a local test cohort (teacher/coach/head logins, all @test.local)
 .venv/Scripts/python.exe manage.py provision_users     # give imported StaffMembers a login: create matching User + SchoolProfile (idempotent; --dry-run to preview)
 .venv/Scripts/python.exe manage.py check_readiness     # read-only audit of onboarding dead-ends (unclassified staff, no login, no active year, dangling manager links); non-zero exit on any blocker
+.venv/Scripts/python.exe manage.py start_next_year     # advance to the next academic year: create the year after the current one (if needed) and mark it current (idempotent; backs the admin "Start next academic year" button)
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings           # delete legacy line meetings with no note content
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings --dry-run # preview what would be deleted
 

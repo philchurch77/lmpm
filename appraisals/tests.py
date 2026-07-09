@@ -15,7 +15,10 @@ email. ``PermissionDenied`` surfaces as HTTP 403 through the test client.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import TestCase
 from django.urls import reverse
 
@@ -1024,3 +1027,49 @@ class StartAppraisalSelfClassifyTests(TestCase):
         self.client.post(self.start_url, {"staff_type": "TEACHING"})
         self.staff.refresh_from_db()
         self.assertEqual(self.staff.staff_type, StaffMember.StaffType.SUPPORT)
+
+
+class StartNextYearTests(TestCase):
+    """AcademicYear.start_next() / the start_next_year command advance the cycle."""
+
+    def test_creates_next_year_and_makes_it_current(self):
+        prev = AcademicYear.objects.create(start_year=2025, is_current=True)
+
+        year, created = AcademicYear.start_next()
+
+        self.assertTrue(created)
+        self.assertEqual(year.start_year, 2026)
+        self.assertTrue(year.is_current)
+        prev.refresh_from_db()
+        self.assertFalse(prev.is_current)
+
+    def test_empty_table_falls_back_to_current_calendar_year(self):
+        year, created = AcademicYear.start_next()
+
+        self.assertTrue(created)
+        self.assertEqual(year.start_year, date.today().year)
+        self.assertTrue(year.is_current)
+
+    def test_activates_pre_created_next_year_without_skipping_or_duplicating(self):
+        # A future year pre-created but not yet current: start_next() should make
+        # it current rather than skip to 2027 or create a duplicate 2026.
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+        AcademicYear.objects.create(start_year=2026, is_current=False)
+
+        year, created = AcademicYear.start_next()
+
+        self.assertFalse(created)
+        self.assertEqual(year.start_year, 2026)
+        self.assertTrue(year.is_current)
+        self.assertEqual(AcademicYear.objects.count(), 2)
+        self.assertEqual(AcademicYear.objects.filter(is_current=True).count(), 1)
+
+    def test_management_command_advances_year(self):
+        AcademicYear.objects.create(start_year=2025, is_current=True)
+
+        call_command("start_next_year")
+
+        self.assertTrue(
+            AcademicYear.objects.filter(start_year=2026, is_current=True).exists()
+        )
+        self.assertEqual(AcademicYear.objects.filter(is_current=True).count(), 1)

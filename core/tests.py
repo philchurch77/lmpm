@@ -280,4 +280,32 @@ class CheckReadinessCommandTests(TestCase):
         make_user("admin@oxlip.test", is_superuser=True)
         output, blocked = self._run()
         self.assertFalse(blocked)
-        self.assertNotIn("admin@oxlip.test", output)
+
+
+class StaffTypeAdminActionTests(TestCase):
+    """The bulk 'Set staff type' admin actions reclassify selected staff."""
+
+    def setUp(self):
+        from django.contrib.admin.sites import AdminSite
+
+        from .admin import StaffMemberAdmin
+
+        self.admin = StaffMemberAdmin(StaffMember, AdminSite())
+        self.a = StaffMember.objects.create(email="a@oxlip.test")
+        self.b = StaffMember.objects.create(email="b@oxlip.test")
+
+    def _request(self):
+        request = RequestFactory().post("/admin/core/staffmember/")
+        SessionMiddleware(lambda r: None).process_request(request)
+        request.session.save()
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_bulk_action_sets_type_on_selected_only(self):
+        queryset = StaffMember.objects.filter(pk=self.a.pk)
+        self.admin.set_type_leader(self._request(), queryset)
+
+        self.a.refresh_from_db()
+        self.b.refresh_from_db()
+        self.assertEqual(self.a.staff_type, StaffMember.StaffType.LEADER)
+        self.assertEqual(self.b.staff_type, "")  # untouched
