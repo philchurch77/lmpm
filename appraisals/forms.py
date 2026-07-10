@@ -15,7 +15,6 @@ from django import forms
 from .models import (
     Appraisal,
     Goal,
-    LeaderGoal,
     LeaderReview,
     LeaderStandard,
     SelfReview,
@@ -24,7 +23,6 @@ from .models import (
 )
 
 YESNO_CHOICES = [("true", "Yes"), ("false", "No")]
-TRISTATE_CHOICES = [("", "—")] + YESNO_CHOICES
 SCORE_CHOICES = [("", "Not answered"), ("1", "1"), ("2", "2"), ("3", "3")]
 
 
@@ -59,17 +57,6 @@ def _score_field():
     return forms.TypedChoiceField(
         choices=SCORE_CHOICES,
         coerce=_coerce_int,
-        empty_value=None,
-        required=False,
-        widget=forms.RadioSelect,
-    )
-
-
-def _tristate_field():
-    """Yes/No/unanswered radio group backed by a nullable BooleanField."""
-    return forms.TypedChoiceField(
-        choices=TRISTATE_CHOICES,
-        coerce=_coerce_bool,
         empty_value=None,
         required=False,
         widget=forms.RadioSelect,
@@ -250,11 +237,13 @@ SelfReviewBulletFormSet = forms.modelformset_factory(
 
 
 class LeaderStandardForm(RoleGatedForm):
-    """One of the 10 Headteachers' Standards: whole-standard score, a "Not in
-    Job Role" toggle and a free-text Examples box (all reviewee-owned).
+    """One scored row of the leader review (an Ethics sub-section or a
+    Headteachers' Standard): whole-row score, a "Not in Job Role" toggle and a
+    free-text Examples box (all reviewee-owned).
 
     `title`/`descriptors` are read-only prompt text, rendered from the instance
-    rather than as editable fields.
+    rather than as editable fields. `not_applicable` is only rendered for the
+    Standards section; Ethics rows leave it at its default False.
     """
 
     teacher_fields = ("score", "not_applicable", "examples")
@@ -269,30 +258,8 @@ class LeaderStandardForm(RoleGatedForm):
         widgets = {"examples": forms.Textarea(attrs={"rows": 3})}
 
 
-class LeaderGoalForm(RoleGatedForm):
-    """A single free-form leader goal (added/removed in the UI)."""
-
-    teacher_fields = ("goal", "evidence_and_discussion", "achieved")
-    segmented_fields = ("achieved",)
-
-    achieved = _tristate_field()
-
-    class Meta:
-        model = LeaderGoal
-        fields = ("goal", "evidence_and_discussion", "achieved")
-        widgets = {
-            "goal": forms.Textarea(attrs={"rows": 3}),
-            "evidence_and_discussion": forms.Textarea(attrs={"rows": 3}),
-        }
-
-
-# Pre-seeded 10 standards (no add/delete). Score lives on the standard itself,
-# so a single inline formset off LeaderReview suffices (no bullet second hop).
+# Pre-seeded scored rows (Ethics + Standards; no add/delete). Score lives on the
+# row itself, so a single inline formset off LeaderReview suffices.
 LeaderStandardFormSet = forms.inlineformset_factory(
     LeaderReview, LeaderStandard, form=LeaderStandardForm, extra=0, can_delete=False
-)
-
-# Free-form goals: add/remove rows in the UI.
-LeaderGoalFormSet = forms.inlineformset_factory(
-    LeaderReview, LeaderGoal, form=LeaderGoalForm, extra=1, can_delete=True
 )

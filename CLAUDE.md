@@ -135,19 +135,25 @@ signs off.
   Yes/No answers onto per-bullet scores (there's no valid mapping) — see
   `appraisals/migrations/0005_backfill_selfreviewbullets.py`.
 - `LeaderReview` (OneToOne with `Appraisal`, `related_name="leader_review"`) — the **senior-leader
-  self-review variant**, seeded by `seed_standards()` from `appraisals/leader_standards_templates.py`
-  (`HEADTEACHER_STANDARDS`, a `(number, title, descriptors)` tuple list; plus static `ETHICS_CONTENT`
-  for Section 1, rendered read-only, never persisted). Deliberately a **separate model set** rather
-  than a third `SelfReview.Kind`, because the shape differs: scoring is **per-standard** not
-  per-bullet. `LeaderStandard` (FK `leader_review`, `related_name="standards"`) carries the whole
-  standard's `score` (`null`/1-3, same scale as `SelfReviewBullet`), a `not_applicable` ("Not in Job
-  Role") toggle, free-text `examples`, and a newline-joined `descriptors` snapshot (read-only prompts,
-  exposed as `descriptor_list`); `save()` forces `score=None` when `not_applicable` (so an N/A standard
-  is never scored regardless of the client-side greying). `LeaderGoal` (FK `leader_review`,
-  `related_name="goals"`) is a **free-form add/remove** goal (goal / evidence / tri-state `achieved`),
-  distinct from the fixed 3-goal `Goal`/Goals-tab. Seeding is called from views like the others. A
-  `StaffMember` with `staff_type=LEADER` gets this variant **instead of** `SelfReview` — the two are
-  never both created for one appraisal.
+  self-review variant**, seeded by `seed_standards()` from `appraisals/leader_standards_templates.py`:
+  Section 1 from `ETHICS_CONTENT` (a `(heading, bullets)` list — the 3 Ethics/Professional-Conduct
+  sub-sections) and Section 2 from `HEADTEACHER_STANDARDS` (a `(number, title, descriptors)` list — the
+  10 standards). Deliberately a **separate model set** rather than a third `SelfReview.Kind`, because
+  the shape differs: scoring is **per-standard** not per-bullet. `LeaderStandard` (FK `leader_review`,
+  `related_name="standards"`) holds **both** section 1 and section 2 rows, distinguished by a `section`
+  field (`ETHICS`/`STANDARDS`); each row carries its `score` (`null`/1-3, same scale as
+  `SelfReviewBullet`), free-text `examples`, and a newline-joined `descriptors` snapshot (read-only
+  prompts, exposed as `descriptor_list`). Standards rows additionally carry a `not_applicable` ("Not in
+  Job Role") toggle; `save()` forces `score=None` when set (so an N/A standard is never scored
+  regardless of the client-side greying). Ethics rows leave `not_applicable` at its default (the toggle
+  isn't rendered for them). Uniqueness is `(leader_review, section, number)`; default ordering is
+  `(section, order)` so Ethics sorts before Standards. `seed_standards()` guards **per row** (by
+  `(section, number)`), so re-running back-fills any missing rows — e.g. adds the Ethics rows to a
+  review that was seeded before Section 1 became scored. Seeding is called from views like the others.
+  A `StaffMember` with `staff_type=LEADER` gets this variant **instead of** `SelfReview` — the two are
+  never both created for one appraisal. (Section 1 was originally static read-only reference text and
+  a "Section 3" free-form-goals model existed; both were dropped at the client's request — Section 1 is
+  now scored, Section 3 removed — see migration `0008`.)
 
 ### UI & access control
 - **Identity**: `appraisals/permissions.py` resolves the logged-in `User`'s role for an appraisal
@@ -173,14 +179,14 @@ signs off.
   not iOS switches. **The self-review tab has two variants**: `_build_section_forms` branches on
   `_is_leader(staff)` (i.e. `staff_type == LEADER`) and builds **either** the teaching/support
   item+bullet forms (above) **or** the leader forms — a single `LeaderStandardFormSet` (inline off
-  `LeaderReview`, so no bullet second-hop) plus a `LeaderGoalFormSet` (add/remove, `extra=1`,
-  `can_delete=True`, bound with explicit `prefix="leadergoals"` to avoid colliding with the
-  appraisal's own `goals` formset on the same page). `_tab_self_review.html` switches on the
-  `is_leader` context flag to include `_tab_leader_review.html`; `self_review_save` picks its
-  `form_keys` dynamically via `_self_review_form_keys` (same endpoint, same teacher-only gate). The
-  add/remove-goal rows and N/A greying are progressive enhancement (`core/static/core/leader_goals.js`,
-  loaded from `detail.html` only when `is_leader`); the server-rendered `extra=1` blank row is the
-  no-JS fallback.
+  `LeaderReview`, so no bullet second-hop) covering all 13 scored rows (3 Ethics + 10 Standards).
+  `_tab_leader_review.html` iterates that one formset twice, filtering on `sform.instance.section` to
+  render Section 1 (Ethics: score + examples, no N/A toggle) and Section 2 (Standards: N/A + score +
+  examples) separately. `_tab_self_review.html` switches on the `is_leader` context flag to include
+  `_tab_leader_review.html`; `self_review_save` picks its `form_keys` dynamically via
+  `_self_review_form_keys` (same endpoint, same teacher-only gate). The Standards N/A greying is
+  progressive enhancement (`core/static/core/leader_standards.js`, loaded from `detail.html` only when
+  `is_leader`).
 - **Nav**: `appraisals/context_processors.py` exposes `user_is_coach` so `core/.../base.html` shows
   "My Team" (now the combined `team:my_team` page — see "Team app" below) for coaches **or** line
   managers. Mounted at `/appraisals/`.
@@ -191,20 +197,20 @@ a matching Django `User` (same email, for SSO) and a `StaffMember` with `staff_t
 for the Headteacher-Standards variant).
 
 ### Known follow-ups
-- `appraisals/tests.py` has a 42-test suite: the `get_appraisal_or_403` role matrix (incl. a
+- `appraisals/tests.py` covers: the `get_appraisal_or_403` role matrix (incl. a
   dedicated test for the coach-email *snapshot* vs. line-management's live lookup), self-review save
   permissions for the per-bullet scoring, `seed_items()` correctness (item/bullet counts computed
   from the template data itself), goals/summary field-level gating, IDOR across every tab and
-  save endpoint, and the senior-leader variant (`seed_standards()` correctness, LEADER→`LeaderReview`
-  selection, the N/A-clears-score rule, goal add/delete, and the leader save role matrix); plus the
-  first-time self-classify flow (an unclassified staff member self-selecting Teaching/Support to
-  start, LEADER never self-selectable, existing type never overwritten). `core/tests.py` covers the
-  SSO auth gate and the `check_readiness` command — no app is now without a test suite.
-- Senior-leader open items (deferred, not blocking): Section 1 (Ethics) is informational-only (no
-  sign-off control); there is no overall/average score roll-up across the 10 standards yet
-  (`not_applicable` is modelled so an N/A-excluding average can be added later); and a leader still
-  sees the appraisal's fixed **Goals** tab alongside the leader review's own Section-3 goals — hiding
-  the former for leaders is a possible follow-up.
+  save endpoint, and the senior-leader variant (`seed_standards()` correctness for **both** the Ethics
+  and Standards sections, LEADER→`LeaderReview` selection, the N/A-clears-score rule, and the leader
+  save role matrix); plus the first-time self-classify flow (an unclassified staff member
+  self-selecting Teaching/Support to start, LEADER never self-selectable, existing type never
+  overwritten). `core/tests.py` covers the SSO auth gate and the `check_readiness` command — no app is
+  now without a test suite.
+- Senior-leader open items (deferred, not blocking): there is no overall/average score roll-up across
+  the standards yet (`not_applicable` is modelled so an N/A-excluding average can be added later); and
+  a leader still sees the appraisal's fixed **Goals** tab — hiding it for leaders is a possible
+  follow-up.
 
 ## Line management app (`line_management/`)
 

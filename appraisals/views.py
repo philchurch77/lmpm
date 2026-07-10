@@ -18,13 +18,11 @@ from core.models import StaffMember
 from .forms import (
     AppraisalSummaryForm,
     GoalFormSet,
-    LeaderGoalFormSet,
     LeaderStandardFormSet,
     SelfReviewBulletFormSet,
     SelfReviewForm,
     SelfReviewItemFormSet,
 )
-from .leader_standards_templates import ETHICS_CONTENT
 from .models import AcademicYear, Appraisal, LeaderReview, SelfReview, SelfReviewBullet
 from .self_review_templates import UPR_DECLARATION_TEXT
 from core.identity import current_staff_member
@@ -139,21 +137,14 @@ def start_appraisal(request):
 
 
 def _build_leader_self_review(appraisal, can_teacher, bound):
-    """Build the senior-leader self-review tab forms (standards + goals)."""
+    """Build the senior-leader self-review tab forms (Ethics + Standards)."""
     leader_review = _ensure_leader_review(appraisal)
     return {
         "is_leader": True,
         "leader_review": leader_review,
-        "ethics_content": ETHICS_CONTENT,
         "leader_standard_formset": LeaderStandardFormSet(
             bound("self-review"),
             instance=leader_review,
-            form_kwargs={"can_teacher": can_teacher, "can_coach": False},
-        ),
-        "leader_goal_formset": LeaderGoalFormSet(
-            bound("self-review"),
-            instance=leader_review,
-            prefix="leadergoals",
             form_kwargs={"can_teacher": can_teacher, "can_coach": False},
         ),
     }
@@ -292,7 +283,7 @@ def _save_section(request, pk, section, can_check, form_keys, success_msg):
 def _self_review_form_keys(forms_ctx):
     """The forms to validate/save differ between the leader and standard tabs."""
     if forms_ctx.get("is_leader"):
-        return ["leader_standard_formset", "leader_goal_formset"]
+        return ["leader_standard_formset"]
     return ["self_review_form", "self_review_items", "self_review_bullets"]
 
 

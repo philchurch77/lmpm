@@ -24,11 +24,10 @@ from django.urls import reverse
 
 from core.models import StaffMember
 
-from .leader_standards_templates import HEADTEACHER_STANDARDS
+from .leader_standards_templates import ETHICS_CONTENT, HEADTEACHER_STANDARDS
 from .models import (
     AcademicYear,
     Appraisal,
-    LeaderGoal,
     LeaderReview,
     LeaderStandard,
     SelfReview,
@@ -716,7 +715,7 @@ class IDORAcrossSectionsTests(TestCase):
 
 
 class SeedStandardsTests(TestCase):
-    """LeaderReview.seed_standards(): the 10 Headteacher Standards, seeded once."""
+    """LeaderReview.seed_standards(): the 3 Ethics rows + 10 Standards, once."""
 
     def setUp(self):
         self.leader = make_staff(
@@ -725,29 +724,50 @@ class SeedStandardsTests(TestCase):
         self.year = make_year()
         self.appraisal = make_appraisal(self.leader, self.year)
 
-    # Catches the standard count drifting from the template constant.
-    def test_seed_creates_ten_standards(self):
+    # Catches the row counts drifting from the template constants.
+    def test_seed_creates_ethics_and_standards_rows(self):
         leader_review = make_leader_review(self.appraisal)
-        self.assertEqual(leader_review.standards.count(), len(HEADTEACHER_STANDARDS))
-        self.assertEqual(leader_review.standards.count(), 10)
+        ethics = leader_review.standards.filter(
+            section=LeaderStandard.Section.ETHICS
+        )
+        standards = leader_review.standards.filter(
+            section=LeaderStandard.Section.STANDARDS
+        )
+        self.assertEqual(ethics.count(), len(ETHICS_CONTENT))
+        self.assertEqual(ethics.count(), 3)
+        self.assertEqual(standards.count(), len(HEADTEACHER_STANDARDS))
+        self.assertEqual(standards.count(), 10)
 
     # Catches number/title/descriptor content or ordering drifting from the
     # template tuples (e.g. an off-by-one in enumerate, or fields swapped).
     def test_seed_round_trips_number_title_and_descriptors(self):
         leader_review = make_leader_review(self.appraisal)
         first_number, first_title, first_descriptors = HEADTEACHER_STANDARDS[0]
-        standard = leader_review.standards.get(number=first_number)
+        standard = leader_review.standards.get(
+            section=LeaderStandard.Section.STANDARDS, number=first_number
+        )
         self.assertEqual(standard.order, 1)
         self.assertEqual(standard.title, first_title)
         self.assertEqual(standard.descriptor_list, list(first_descriptors))
         self.assertIsNone(standard.score)
         self.assertFalse(standard.not_applicable)
 
-    # Catches repeated _ensure_leader_review calls (every GET) duplicating rows.
+    # Catches the Ethics section not being seeded as scored rows.
+    def test_seed_round_trips_ethics_heading_and_bullets(self):
+        leader_review = make_leader_review(self.appraisal)
+        first_heading, first_bullets = ETHICS_CONTENT[0]
+        ethic = leader_review.standards.get(
+            section=LeaderStandard.Section.ETHICS, number=1
+        )
+        self.assertEqual(ethic.title, first_heading)
+        self.assertEqual(ethic.descriptor_list, list(first_bullets))
+
+    # Catches repeated _ensure_leader_review calls (every GET) duplicating rows,
+    # and confirms the per-row guard back-fills without double-seeding.
     def test_seed_called_twice_does_not_duplicate(self):
         leader_review = make_leader_review(self.appraisal)
         leader_review.seed_standards()
-        self.assertEqual(leader_review.standards.count(), 10)
+        self.assertEqual(leader_review.standards.count(), 13)
 
 
 class LeaderReviewSelectionTests(TestCase):
@@ -781,7 +801,7 @@ class LeaderReviewSelectionTests(TestCase):
         self.client.get(self.detail_url)
         self.assertFalse(SelfReview.objects.filter(appraisal=self.appraisal).exists())
         leader_review = LeaderReview.objects.get(appraisal=self.appraisal)
-        self.assertEqual(leader_review.standards.count(), 10)
+        self.assertEqual(leader_review.standards.count(), 13)
 
 
 class LeaderReviewSaveTests(TestCase):
@@ -818,17 +838,16 @@ class LeaderReviewSaveTests(TestCase):
             "appraisals:self_review_save", args=[self.appraisal.pk]
         )
 
-    def _payload(self, *, score="2", examples="", na_index=None, goals=None):
-        """A full, valid POST payload for the standards + leader-goals formsets.
+    def _payload(self, *, score="2", examples="", na_index=None):
+        """A full, valid POST payload for the scored-rows inline formset.
 
-        The standards inline formset uses the default prefix "standards"
-        (derived from LeaderReview.standards); the goals formset is bound with
-        the explicit prefix "leadergoals" in the view (to avoid colliding with
-        the appraisal's own "goals" formset on the same page). ``goals`` is a
-        list of field dicts; any dict carrying an "id" is treated as an existing
-        (INITIAL) row.
+        Covers all 13 rows (3 Ethics + 10 Standards) under the default prefix
+        "standards" (derived from LeaderReview.standards), in the same
+        section-then-order sequence the formset renders them.
         """
-        standards = list(self.leader_review.standards.order_by("order"))
+        standards = list(
+            self.leader_review.standards.order_by("section", "order")
+        )
         payload = {
             "standards-TOTAL_FORMS": str(len(standards)),
             "standards-INITIAL_FORMS": str(len(standards)),
@@ -842,20 +861,6 @@ class LeaderReviewSaveTests(TestCase):
                 "true" if na_index == index else "false"
             )
             payload[f"standards-{index}-examples"] = examples
-
-        goals = goals or []
-        initial = sum(1 for goal in goals if goal.get("id"))
-        payload.update(
-            {
-                "leadergoals-TOTAL_FORMS": str(len(goals)),
-                "leadergoals-INITIAL_FORMS": str(initial),
-                "leadergoals-MIN_NUM_FORMS": "0",
-                "leadergoals-MAX_NUM_FORMS": "1000",
-            }
-        )
-        for index, goal in enumerate(goals):
-            for field, value in goal.items():
-                payload[f"leadergoals-{index}-{field}"] = value
         return payload
 
     # Catches the leader's own scores/examples silently failing to persist.
@@ -871,57 +876,19 @@ class LeaderReviewSaveTests(TestCase):
 
     # Catches the "Not in Job Role" rule not clearing a submitted score — a
     # standard marked N/A must never carry a score (model.save enforces this).
+    # Index 3 is the first Standards row (the 3 Ethics rows sort first).
     def test_not_applicable_clears_score_on_save(self):
         self.client.force_login(self.leader_user)
         response = self.client.post(
-            self.save_url, self._payload(score="3", na_index=0), follow=True
+            self.save_url, self._payload(score="3", na_index=3), follow=True
         )
         self.assertEqual(response.status_code, 200)
-        standards = list(self.leader_review.standards.order_by("order"))
-        self.assertTrue(standards[0].not_applicable)
-        self.assertIsNone(standards[0].score)
-        # The rest keep their score.
-        self.assertTrue(all(s.score == 3 for s in standards[1:]))
-
-    # Catches the leader being unable to add a free-form goal.
-    def test_leader_can_add_goal(self):
-        self.client.force_login(self.leader_user)
-        payload = self._payload(
-            goals=[
-                {
-                    "goal": "Improve attendance",
-                    "evidence_and_discussion": "Weekly tracking",
-                    "achieved": "false",
-                }
-            ]
-        )
-        response = self.client.post(self.save_url, payload, follow=True)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.leader_review.goals.count(), 1)
-        goal = self.leader_review.goals.get()
-        self.assertEqual(goal.goal, "Improve attendance")
-        self.assertFalse(goal.achieved)
-
-    # Catches the can_delete path failing to remove a goal via the DELETE flag.
-    def test_leader_can_delete_goal(self):
-        goal = LeaderGoal.objects.create(
-            leader_review=self.leader_review, order=1, goal="Old goal"
-        )
-        self.client.force_login(self.leader_user)
-        payload = self._payload(
-            goals=[
-                {
-                    "id": str(goal.pk),
-                    "goal": "Old goal",
-                    "evidence_and_discussion": "",
-                    "achieved": "",
-                    "DELETE": "on",
-                }
-            ]
-        )
-        response = self.client.post(self.save_url, payload, follow=True)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.leader_review.goals.count(), 0)
+        standards = list(self.leader_review.standards.order_by("section", "order"))
+        self.assertTrue(standards[3].not_applicable)
+        self.assertIsNone(standards[3].score)
+        # Every other row keeps its score.
+        others = standards[:3] + standards[4:]
+        self.assertTrue(all(s.score == 3 for s in others))
 
     # Catches the coach being able to write into the leader's own fields.
     def test_coach_cannot_save_leader_review(self):
