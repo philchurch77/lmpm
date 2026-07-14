@@ -1,20 +1,20 @@
 {% extends "core/base.html" %}
 
-{% block title %}Appraisal — {{ appraisal.teacher.email }}{% endblock %}
+{% block title %}Goal Setting and Review — {{ appraisal.teacher.email }}{% endblock %}
 
 {% block content %}
   <header class="page-header">
-    <h1 class="page-title">Appraisal</h1>
+    <h1 class="page-title">Goal Setting and Review</h1>
     <p class="appraisal-sub">
       {{ appraisal.teacher.email }} · {{ appraisal.academic_year }} ·
       <span class="status-badge status-badge--{{ appraisal.status|lower }}">{{ appraisal.get_status_display }}</span>
-      {% if role == 'coach' %} · You are the coach{% elif role == 'teacher' %} · This is your appraisal{% endif %}
+      {% if role == 'coach' %} · You are the coach{% elif role == 'teacher' %} · This is your goal setting and review{% endif %}
     </p>
   </header>
 
 
   {% if locked %}
-    <ul class="messages"><li class="info">This appraisal is signed off and read-only.</li></ul>
+    <ul class="messages"><li class="info">This goal setting and review is signed off and read-only.</li></ul>
   {% endif %}
 
   <div class="tabs" role="tablist">

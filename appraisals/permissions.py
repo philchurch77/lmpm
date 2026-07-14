@@ -73,5 +73,5 @@ def get_appraisal_or_403(request, pk):
     staff = current_staff_member(request)
     role = appraisal_role(appraisal, staff, request.user)
     if role == ROLE_NONE:
-        raise PermissionDenied("You do not have access to this appraisal.")
+        raise PermissionDenied("You do not have access to this goal setting and review.")
     return appraisal, staff, role

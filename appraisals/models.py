@@ -131,6 +131,9 @@ class Appraisal(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        # Client-facing labels (the model/table stay "Appraisal").
+        verbose_name = "Goal Setting and Review"
+        verbose_name_plural = "Goal Setting and Reviews"
         ordering = ["-academic_year__start_year"]
         constraints = [
             models.UniqueConstraint(

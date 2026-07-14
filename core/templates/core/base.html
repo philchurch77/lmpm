@@ -37,7 +37,7 @@
 
         <nav class="nav" aria-label="Primary">
           <a href="/" {% if request.path == '/' %}aria-current="page"{% endif %}>Home</a>
-          <a href="{% url 'appraisals:my_appraisal' %}" {% if '/appraisals/' in request.path %}aria-current="page"{% endif %}>My Appraisal</a>
+          <a href="{% url 'appraisals:my_appraisal' %}" {% if '/appraisals/' in request.path %}aria-current="page"{% endif %}>My Goal Setting and Review</a>
           <a href="{% url 'line_management:my_meetings' %}" {% if '/line-management/' in request.path and '/line-management/staff/' not in request.path %}aria-current="page"{% endif %}>My Line Meetings</a>
           {% if user_is_coach or user_is_line_manager %}
             <a href="{% url 'team:my_team' %}" {% if '/team/' in request.path or '/line-management/staff/' in request.path %}aria-current="page"{% endif %}>My Team</a>
@@ -46,7 +46,7 @@
 
         <div class="nav-bottom">
           {% if user.is_superuser %}
-            <a href="{% url 'overview:appraisals' %}" {% if '/overview/appraisals/' in request.path %}aria-current="page"{% endif %}>Appraisals Overview</a>
+            <a href="{% url 'overview:appraisals' %}" {% if '/overview/appraisals/' in request.path %}aria-current="page"{% endif %}>Goal Setting and Review Overview</a>
             <a href="{% url 'overview:line_management' %}" {% if '/overview/line-management/' in request.path %}aria-current="page"{% endif %}>Line Management Overview</a>
             <a href="{% url 'data_import:hub' %}" {% if '/import/' in request.path %}aria-current="page"{% endif %}>Bulk Import</a>
             <a href="/admin/" {% if '/admin/' in request.path %}aria-current="page"{% endif %}>Admin</a>

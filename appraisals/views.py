@@ -119,7 +119,7 @@ def start_appraisal(request):
 
     year = AcademicYear.objects.filter(is_current=True).first()
     if year is None:
-        messages.error(request, "There is no active appraisal cycle yet.")
+        messages.error(request, "There is no active goal setting and review cycle yet.")
         return redirect("appraisals:my_appraisal")
 
     appraisal, created = Appraisal.objects.get_or_create(

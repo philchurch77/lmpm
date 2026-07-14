@@ -951,7 +951,7 @@ class StartAppraisalSelfClassifyTests(TestCase):
         response = self.client.get(reverse("appraisals:my_appraisal"))
         self.assertContains(response, "Teaching")
         self.assertContains(response, "Support")
-        self.assertContains(response, "Start my appraisal")
+        self.assertContains(response, "Start my goal setting and review")
 
     def test_posting_teaching_sets_type_and_seeds_self_review(self):
         response = self.client.post(self.start_url, {"staff_type": "TEACHING"})

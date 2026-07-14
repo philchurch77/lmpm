@@ -1,19 +1,19 @@
 {% extends "core/base.html" %}
 
-{% block title %}Appraisals Overview{% endblock %}
+{% block title %}Goal Setting and Review Overview{% endblock %}
 
 {% block content %}
   <header class="page-header">
-    <h1 class="page-title">Appraisals Overview</h1>
+    <h1 class="page-title">Goal Setting and Review Overview</h1>
     {% if year %}
-      <p class="appraisal-sub">Every staff member's appraisal status for {{ year }}.</p>
+      <p class="appraisal-sub">Every staff member's goal setting and review status for {{ year }}.</p>
     {% endif %}
   </header>
 
   {% if no_year %}
     <div class="reflection-card">
       <div class="reflection-card-body">
-        <p class="descriptor-text">No active appraisal cycle. Mark an academic year as current to populate this overview.</p>
+        <p class="descriptor-text">No active goal setting and review cycle. Mark an academic year as current to populate this overview.</p>
       </div>
     </div>
   {% else %}
