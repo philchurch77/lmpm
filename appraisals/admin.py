@@ -1,6 +1,9 @@
 from django.contrib import admin, messages
 from django.shortcuts import redirect
+from django.template.defaultfilters import linebreaksbr
 from django.urls import path
+from django.utils.html import escape
+from django.utils.safestring import mark_safe
 
 from .models import (
     AcademicYear,
@@ -94,16 +97,91 @@ class GoalAdmin(admin.ModelAdmin):
     autocomplete_fields = ("appraisal",)
 
 
+# Shared cell styling for the read-only "at a glance" table.
+_CELL = "border:1px solid #ccc;padding:6px 9px;vertical-align:top"
+_SCORE_COLOURS = {1: "#c0392b", 2: "#b7791f", 3: "#217a3b"}
+
+
+def _score_cell(score):
+    """One <td> for a bullet's score, colour-coded (blank = Not Answered)."""
+    if score is None:
+        return f"<td style='{_CELL};text-align:center;color:#999'>—</td>"
+    colour = _SCORE_COLOURS.get(score, "#333")
+    return (
+        f"<td style='{_CELL};text-align:center;font-weight:700;"
+        f"color:{colour}'>{score}</td>"
+    )
+
+
+def render_self_review_table(self_review):
+    """A clean Section / Criterion / Score / Evidence table for a self-review.
+
+    Groups by ``SelfReviewItem`` (one shared Evidence cell spanning the item's
+    bullets) so a school admin sees the criterion wording, its 1-3 score, and
+    the staff member's comment together — the score lives on the child bullet,
+    which the default inlines never surface alongside the evidence.
+    """
+    rows = [
+        "<table style='border-collapse:collapse;width:100%;font-size:13px'>",
+        "<thead><tr>",
+        f"<th style='{_CELL};background:#f4f4f4;text-align:left'>Section</th>",
+        f"<th style='{_CELL};background:#f4f4f4;text-align:left'>Criterion</th>",
+        f"<th style='{_CELL};background:#f4f4f4;width:64px'>Score</th>",
+        f"<th style='{_CELL};background:#f4f4f4;text-align:left'>"
+        "Evidence / comment</th>",
+        "</tr></thead><tbody>",
+    ]
+    for item in self_review.items.prefetch_related("bullets").all():
+        bullets = list(item.bullets.all()) or [None]
+        span = len(bullets)
+        label = escape(item.code)
+        if item.heading:
+            label += f"<br><span style='color:#666'>{escape(item.heading)}</span>"
+        if item.evidence.strip():
+            evidence = linebreaksbr(item.evidence)
+        else:
+            evidence = "<span style='color:#999'>—</span>"
+        for index, bullet in enumerate(bullets):
+            cells = []
+            if index == 0:
+                cells.append(
+                    f"<td rowspan='{span}' style='{_CELL};font-weight:600'>"
+                    f"{label}</td>"
+                )
+            if bullet is None:
+                cells.append(f"<td style='{_CELL};color:#999'>—</td>")
+                cells.append(_score_cell(None))
+            else:
+                cells.append(f"<td style='{_CELL}'>{escape(bullet.text)}</td>")
+                cells.append(_score_cell(bullet.score))
+            if index == 0:
+                cells.append(f"<td rowspan='{span}' style='{_CELL}'>{evidence}</td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+    rows.append("</tbody></table>")
+    return mark_safe("".join(rows))
+
+
 class SelfReviewItemInline(admin.TabularInline):
     model = SelfReviewItem
     extra = 0
-    fields = ("order", "code", "heading", "evidence")
+    fields = ("order", "code", "heading", "scores", "evidence")
+    readonly_fields = ("order", "code", "heading", "scores")
+
+    @admin.display(description="Score(s)")
+    def scores(self, obj):
+        if obj is None or obj.pk is None:
+            return "—"
+        parts = [
+            str(b.score) if b.score is not None else "–" for b in obj.bullets.all()
+        ]
+        return ", ".join(parts) or "—"
 
 
 class SelfReviewBulletInline(admin.TabularInline):
     model = SelfReviewBullet
     extra = 0
     fields = ("order", "text", "score")
+    readonly_fields = ("order", "text")
 
 
 @admin.register(SelfReview)
@@ -112,12 +190,32 @@ class SelfReviewAdmin(admin.ModelAdmin):
     list_filter = ("kind",)
     search_fields = ("appraisal__teacher__email",)
     autocomplete_fields = ("appraisal",)
+    readonly_fields = ("review_summary",)
     inlines = (SelfReviewItemInline,)
+
+    def get_fieldsets(self, request, obj=None):
+        base = [(None, {"fields": ("appraisal", "kind")})]
+        if obj is not None:
+            base.append(("Review at a glance", {"fields": ("review_summary",)}))
+        return base
+
+    @admin.display(description="")
+    def review_summary(self, obj):
+        if obj is None or obj.pk is None:
+            return "—"
+        return render_self_review_table(obj)
 
 
 @admin.register(SelfReviewItem)
 class SelfReviewItemAdmin(admin.ModelAdmin):
-    list_display = ("self_review", "order", "code", "heading")
+    list_display = ("self_review", "order", "code", "heading", "scores")
     search_fields = ("self_review__appraisal__teacher__email", "code", "heading")
     autocomplete_fields = ("self_review",)
     inlines = (SelfReviewBulletInline,)
+
+    @admin.display(description="Score(s)")
+    def scores(self, obj):
+        parts = [
+            str(b.score) if b.score is not None else "–" for b in obj.bullets.all()
+        ]
+        return ", ".join(parts) or "—"
