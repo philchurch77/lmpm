@@ -1,27 +1,67 @@
-{% if previous %}
+{% if last_year_formset.forms %}
   <p class="descriptor-text">Review of goals set in {{ previous.academic_year }}.</p>
-  {% for goal in previous.goals.all %}
-    <div class="reflection-card">
-      <div class="reflection-card-header">
-        Goal {{ goal.order }} — {{ goal.get_goal_type_display }}
-      </div>
-      <div class="reflection-card-body">
-        {% if goal.title %}<p class="descriptor-text">{{ goal.title|linebreaksbr }}</p>{% endif %}
-        <div class="readonly-field">
-          <span class="field-label">Review — teacher comments</span>
-          <p>{{ goal.teacher_review_comment|linebreaksbr|default:"—" }}</p>
+
+  <form method="post" action="{% url 'appraisals:last_year_save' pk=appraisal.pk %}" data-warn-unsaved>
+    {% csrf_token %}
+    {{ last_year_formset.management_form }}
+    {{ last_year_formset.non_form_errors }}
+
+    {% for gform in last_year_formset %}
+      <div class="reflection-card">
+        <div class="reflection-card-header">
+          Goal {{ gform.instance.order }} — {{ gform.instance.get_goal_type_display }}
         </div>
-        <div class="readonly-field">
-          <span class="field-label">Review — coach comments</span>
-          <p>{{ goal.coach_review_comment|linebreaksbr|default:"—" }}</p>
+        <div class="reflection-card-body">
+          {{ gform.id }}
+
+          {# The goal itself is settled — shown as context for the review below. #}
+          {% if gform.instance.title %}
+            <div class="readonly-field">
+              <span class="field-label">Goal</span>
+              <p>{{ gform.instance.title|linebreaksbr }}</p>
+            </div>
+          {% endif %}
+          {% if gform.instance.steps_to_success %}
+            <div class="readonly-field">
+              <span class="field-label">Steps to success</span>
+              <p>{{ gform.instance.steps_to_success|linebreaksbr }}</p>
+            </div>
+          {% endif %}
+          {% if gform.instance.success_criteria %}
+            <div class="readonly-field">
+              <span class="field-label">Success criteria</span>
+              <p>{{ gform.instance.success_criteria|linebreaksbr }}</p>
+            </div>
+          {% endif %}
+
+          <div class="field-row">
+            <label for="{{ gform.teacher_review_comment.id_for_label }}">Review — teacher comments</label>
+            {{ gform.teacher_review_comment }}
+            {% if gform.teacher_review_comment.errors %}<div class="field-errors">{{ gform.teacher_review_comment.errors }}</div>{% endif %}
+          </div>
+          <div class="field-row">
+            <label for="{{ gform.coach_review_comment.id_for_label }}">Review — coach comments</label>
+            {{ gform.coach_review_comment }}
+            {% if gform.coach_review_comment.errors %}<div class="field-errors">{{ gform.coach_review_comment.errors }}</div>{% endif %}
+          </div>
         </div>
       </div>
-    </div>
-  {% endfor %}
+    {% endfor %}
+
+    {% if not locked %}
+      <div class="actions"><button type="submit">Save review of last year</button></div>
+    {% endif %}
+  </form>
 {% else %}
   <div class="reflection-card">
     <div class="reflection-card-body">
-      <p class="descriptor-text">No previous goal setting and review on record.</p>
+      <p class="descriptor-text">
+        {% if previous %}
+          No goals were recorded in {{ previous.academic_year }}, so there is nothing to review.
+        {% else %}
+          No previous goal setting and review on record.
+        {% endif %}
+      </p>
     </div>
   </div>
 {% endif %}

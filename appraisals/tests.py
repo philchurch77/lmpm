@@ -24,6 +24,7 @@ from django.urls import reverse
 
 from core.models import StaffMember
 
+from .admin import render_self_review_table
 from .leader_standards_templates import ETHICS_CONTENT, HEADTEACHER_STANDARDS
 from .models import (
     AcademicYear,
@@ -857,9 +858,10 @@ class LeaderReviewSaveTests(TestCase):
         for index, standard in enumerate(standards):
             payload[f"standards-{index}-id"] = str(standard.pk)
             payload[f"standards-{index}-score"] = score
-            payload[f"standards-{index}-not_applicable"] = (
-                "true" if na_index == index else "false"
-            )
+            # "Not in job role" is a tick box: an unticked box submits no key
+            # at all, so only the N/A row carries one.
+            if na_index == index:
+                payload[f"standards-{index}-not_applicable"] = "on"
             payload[f"standards-{index}-examples"] = examples
         return payload
 
@@ -889,6 +891,32 @@ class LeaderReviewSaveTests(TestCase):
         # Every other row keeps its score.
         others = standards[:3] + standards[4:]
         self.assertTrue(all(s.score == 3 for s in others))
+
+    # "Not in job role" is a tick box, not a Yes/No pair. Unticking must clear
+    # a previously-set flag — the classic checkbox trap, since an unticked box
+    # submits nothing at all and a naive read leaves the old value in place.
+    def test_unticking_not_in_job_role_clears_the_flag(self):
+        self.client.force_login(self.leader_user)
+        self.client.post(self.save_url, self._payload(score="3", na_index=3), follow=True)
+        standards = list(self.leader_review.standards.order_by("section", "order"))
+        self.assertTrue(standards[3].not_applicable)
+
+        # Post again with no N/A row at all (every box unticked).
+        self.client.post(self.save_url, self._payload(score="2"), follow=True)
+        standards = list(self.leader_review.standards.order_by("section", "order"))
+        self.assertFalse(standards[3].not_applicable)
+        self.assertEqual(standards[3].score, 2)
+
+    # Guards the widget swap itself: a checkbox input, not the old radio pair.
+    def test_not_in_job_role_renders_as_a_tick_box(self):
+        self.client.force_login(self.leader_user)
+        response = self.client.get(self.detail_url)
+        self.assertContains(
+            response, 'type="checkbox" name="standards-3-not_applicable"'
+        )
+        self.assertNotContains(
+            response, 'type="radio" name="standards-3-not_applicable"'
+        )
 
     # Catches the coach being able to write into the leader's own fields.
     def test_coach_cannot_save_leader_review(self):
@@ -1040,3 +1068,228 @@ class StartNextYearTests(TestCase):
             AcademicYear.objects.filter(start_year=2026, is_current=True).exists()
         )
         self.assertEqual(AcademicYear.objects.filter(is_current=True).count(), 1)
+
+
+class SelfReviewAdminSummaryTests(TestCase):
+    """The admin 'Review at a glance' table (render_self_review_table).
+
+    A school admin needs to see each criterion's score and comment together;
+    the score lives on the child SelfReviewBullet, which the default admin
+    inlines never surface next to the item's evidence. Also guards the
+    HTML-escaping of staff-entered text (the table is rendered mark_safe).
+    """
+
+    def setUp(self):
+        self.staff = make_staff(
+            "support@oxlip.test", staff_type=StaffMember.StaffType.SUPPORT
+        )
+        self.year = make_year()
+        self.appraisal = make_appraisal(self.staff, self.year)
+        self.self_review = make_self_review(
+            self.appraisal, kind=SelfReview.Kind.SUPPORT
+        )
+
+    def _bullets(self):
+        return list(
+            SelfReviewBullet.objects.filter(
+                self_review_item__self_review=self.self_review
+            ).order_by("self_review_item__order")
+        )
+
+    def test_table_shows_scores_and_evidence_together(self):
+        bullets = self._bullets()
+        bullets[0].score = 2
+        bullets[0].save()
+        bullets[1].score = 3
+        bullets[1].save()
+        item1 = self.self_review.items.order_by("order").first()
+        item1.evidence = "My evidence for section one."
+        item1.save()
+
+        html = render_self_review_table(self.self_review)
+
+        self.assertIn("My evidence for section one.", html)
+        # Colour-coded score cells (distinct from the section-code cell, which
+        # for support items would also read ">2</td>").
+        self.assertIn("color:#b7791f'>2</td>", html)  # amber = 2
+        self.assertIn("color:#217a3b'>3</td>", html)  # green = 3
+        # A bullet left unanswered shows the muted em-dash, not a number.
+        self.assertIn(";color:#999'>—</td>", html)
+
+    def test_staff_entered_html_is_escaped(self):
+        item1 = self.self_review.items.order_by("order").first()
+        item1.evidence = "<script>alert('x')</script>"
+        item1.save()
+        bullet = SelfReviewBullet.objects.filter(self_review_item=item1).first()
+        bullet.text = "Comply with <b>policy</b> & procedures"
+        bullet.save()
+
+        html = render_self_review_table(self.self_review)
+
+        self.assertNotIn("<script>alert", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn("&lt;b&gt;policy&lt;/b&gt;", html)
+        self.assertIn("&amp;", html)
+
+
+class LastYearGoalReviewTests(TestCase):
+    """Reviewing last year's goals from this year's appraisal page.
+
+    The goal row carries both its setup and its end-of-cycle review, so the
+    Last Year tab edits the *previous* appraisal's Goal rows while being gated
+    by the *current* appraisal's role and lock. These tests pin that split (the
+    one non-obvious rule here) plus the usual teacher/coach field boundary and
+    IDOR chokepoint.
+    """
+
+    def setUp(self):
+        self.teacher_email = "teacher@oxlip.test"
+        self.coach_email = "coach@oxlip.test"
+        self.stranger_email = "stranger@oxlip.test"
+
+        self.teacher_user = make_user(self.teacher_email)
+        self.coach_user = make_user(self.coach_email)
+        self.stranger_user = make_user(self.stranger_email)
+
+        self.teacher = make_staff(
+            self.teacher_email,
+            performance_manager_email=self.coach_email,
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        make_staff(self.coach_email)
+        make_staff(self.stranger_email)
+
+        self.last_year = make_year(2024, is_current=False)
+        self.year = make_year(2025)
+        self.previous = make_appraisal(
+            self.teacher, self.last_year, coach_email=self.coach_email
+        )
+        self.appraisal = make_appraisal(
+            self.teacher, self.year, coach_email=self.coach_email
+        )
+
+        self.detail_url = reverse(
+            "appraisals:detail_tab", args=[self.appraisal.pk, "last-year"]
+        )
+        self.save_url = reverse("appraisals:last_year_save", args=[self.appraisal.pk])
+
+    def _payload(self, *, teacher_comment="", coach_comment=""):
+        """A full, valid POST payload for the last-year formset (prefix "lastyear")."""
+        goals = list(self.previous.goals.order_by("order"))
+        payload = {
+            "lastyear-TOTAL_FORMS": str(len(goals)),
+            "lastyear-INITIAL_FORMS": str(len(goals)),
+            "lastyear-MIN_NUM_FORMS": "0",
+            "lastyear-MAX_NUM_FORMS": "1000",
+        }
+        for index, goal in enumerate(goals):
+            payload[f"lastyear-{index}-id"] = str(goal.pk)
+            payload[f"lastyear-{index}-teacher_review_comment"] = teacher_comment
+            payload[f"lastyear-{index}-coach_review_comment"] = coach_comment
+        return payload
+
+    def _comments(self):
+        return [
+            (g.teacher_review_comment, g.coach_review_comment)
+            for g in self.previous.goals.order_by("order")
+        ]
+
+    # The whole point of the feature: the boxes must actually be on the page.
+    def test_last_year_tab_renders_editable_comment_boxes(self):
+        self.client.force_login(self.teacher_user)
+        response = self.client.get(self.detail_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "lastyear-0-teacher_review_comment")
+        self.assertContains(response, self.save_url)
+
+    def test_teacher_can_save_review_of_last_years_goals(self):
+        self.client.force_login(self.teacher_user)
+        response = self.client.post(
+            self.save_url, self._payload(teacher_comment="Met in full."), follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(t == "Met in full." for t, _ in self._comments()))
+
+    def test_coach_can_save_review_of_last_years_goals(self):
+        self.client.force_login(self.coach_user)
+        response = self.client.post(
+            self.save_url, self._payload(coach_comment="Agreed."), follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(c == "Agreed." for _, c in self._comments()))
+
+    # Field-level gating is the security boundary: a disabled field must ignore
+    # whatever the other role posts into it.
+    def test_teacher_cannot_write_coach_comment(self):
+        self.client.force_login(self.teacher_user)
+        self.client.post(
+            self.save_url,
+            self._payload(teacher_comment="Mine.", coach_comment="Forged."),
+            follow=True,
+        )
+        self.assertTrue(all(t == "Mine." for t, _ in self._comments()))
+        self.assertTrue(all(c == "" for _, c in self._comments()))
+
+    def test_coach_cannot_write_teacher_comment(self):
+        self.client.force_login(self.coach_user)
+        self.client.post(
+            self.save_url,
+            self._payload(teacher_comment="Forged.", coach_comment="Mine."),
+            follow=True,
+        )
+        self.assertTrue(all(t == "" for t, _ in self._comments()))
+        self.assertTrue(all(c == "Mine." for _, c in self._comments()))
+
+    # The deliberate design decision: last year's appraisal is normally already
+    # signed off, so honouring *its* lock would make the review unwritable.
+    def test_signed_off_previous_year_does_not_block_the_review(self):
+        self.previous.status = Appraisal.Status.SIGNED_OFF
+        self.previous.save(update_fields=["status"])
+        self.client.force_login(self.teacher_user)
+        response = self.client.post(
+            self.save_url, self._payload(teacher_comment="Reviewed."), follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(all(t == "Reviewed." for t, _ in self._comments()))
+
+    # ...but this year's lock does, like every other section.
+    def test_locked_current_appraisal_blocks_the_review(self):
+        self.appraisal.status = Appraisal.Status.SIGNED_OFF
+        self.appraisal.save(update_fields=["status"])
+        self.client.force_login(self.teacher_user)
+        response = self.client.post(
+            self.save_url, self._payload(teacher_comment="Too late.")
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(all(t == "" for t, _ in self._comments()))
+
+    # IDOR: the previous appraisal is derived server-side, never taken from the
+    # request, so a stranger is stopped at the current appraisal's chokepoint.
+    def test_stranger_cannot_save_review(self):
+        self.client.force_login(self.stranger_user)
+        response = self.client.post(
+            self.save_url, self._payload(teacher_comment="Not mine.")
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(all(t == "" for t, _ in self._comments()))
+
+    def test_no_previous_appraisal_is_forbidden_not_a_crash(self):
+        other = make_staff(
+            "solo@oxlip.test",
+            performance_manager_email=self.coach_email,
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        make_user("solo@oxlip.test")
+        first = make_appraisal(other, self.year, coach_email=self.coach_email)
+        self.client.force_login(User.objects.get(email="solo@oxlip.test"))
+
+        detail = self.client.get(
+            reverse("appraisals:detail_tab", args=[first.pk, "last-year"])
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, "No previous goal setting and review on record.")
+
+        response = self.client.post(
+            reverse("appraisals:last_year_save", args=[first.pk]), {}
+        )
+        self.assertEqual(response.status_code, 403)

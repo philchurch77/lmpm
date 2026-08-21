@@ -18,6 +18,7 @@ from core.models import StaffMember
 from .forms import (
     AppraisalSummaryForm,
     GoalFormSet,
+    LastYearGoalFormSet,
     LeaderStandardFormSet,
     SelfReviewBulletFormSet,
     SelfReviewForm,
@@ -40,6 +41,19 @@ def _can_edit_either(appraisal, role):
     return can_edit_teacher_fields(appraisal, role) or can_edit_coach_fields(
         appraisal, role
     )
+
+
+def _can_edit_last_year(appraisal, role):
+    """Whether the viewer may review last year's goals from this appraisal.
+
+    Deliberately gated on **this** year's appraisal (its role and its lock),
+    not last year's: reviewing last year's goals is part of this year's cycle,
+    and last year's appraisal is normally already signed off — honouring its
+    lock would mean the review could never be written. The previous appraisal
+    is always derived via ``appraisal.previous()``, never taken from the
+    request, so there is no new IDOR surface.
+    """
+    return appraisal.previous() is not None and _can_edit_either(appraisal, role)
 
 
 def _is_leader(staff):
@@ -209,8 +223,24 @@ def _build_section_forms(appraisal, staff, role, *, section=None, data=None):
             appraisal, staff, can_teacher, bound
         )
 
+    # Last year's goals are reviewed from this year's page, so the formset is
+    # bound to the previous appraisal but gated by the current one's role/lock.
+    previous = appraisal.previous()
+    last_year_formset = (
+        LastYearGoalFormSet(
+            bound("last-year"),
+            instance=previous,
+            prefix="lastyear",
+            form_kwargs={"can_teacher": can_teacher, "can_coach": can_coach},
+        )
+        if previous is not None
+        else None
+    )
+
     return {
         **section_forms,
+        "previous": previous,
+        "last_year_formset": last_year_formset,
         "goal_formset": GoalFormSet(
             bound("goals"),
             instance=appraisal,
@@ -232,7 +262,6 @@ def _render_detail(request, appraisal, role, forms_ctx, active_tab):
         "locked": appraisal.is_locked,
         "active_tab": active_tab,
         "tabs": TABS,
-        "previous": appraisal.previous(),
         "upr_text": UPR_DECLARATION_TEXT,
         **forms_ctx,
     }
@@ -297,6 +326,19 @@ def self_review_save(request, pk):
         can_edit_teacher_fields,
         _self_review_form_keys,
         "Self-review saved.",
+    )
+
+
+@login_required
+@require_POST
+def last_year_save(request, pk):
+    return _save_section(
+        request,
+        pk,
+        "last-year",
+        _can_edit_last_year,
+        ["last_year_formset"],
+        "Review of last year's goals saved.",
     )
 
 

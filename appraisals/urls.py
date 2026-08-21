@@ -10,6 +10,7 @@ urlpatterns = [
     path("<int:pk>/", views.appraisal_detail, name="detail"),
     path("<int:pk>/<slug:tab>/", views.appraisal_detail, name="detail_tab"),
     path("<int:pk>/self-review/save/", views.self_review_save, name="self_review_save"),
+    path("<int:pk>/last-year/save/", views.last_year_save, name="last_year_save"),
     path("<int:pk>/goals/save/", views.goals_save, name="goals_save"),
     path("<int:pk>/summary/save/", views.summary_save, name="summary_save"),
 ]

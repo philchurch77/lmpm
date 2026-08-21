@@ -42,8 +42,11 @@
             {% for descriptor in sform.instance.descriptor_list %}<li>{{ descriptor }}</li>{% endfor %}
           </ul>
           <div class="field-row">
-            <span class="field-label">Not in job role</span>
-            {% include "appraisals/_widgets/yesno.html" with field=sform.not_applicable %}
+            <label class="check-row">
+              {{ sform.not_applicable }}
+              <span class="check-row-text">Not in job role</span>
+            </label>
+            {% if sform.not_applicable.errors %}<div class="field-errors">{{ sform.not_applicable.errors }}</div>{% endif %}
           </div>
           <div class="field-row leader-standard-score" data-leader-score>
             <span class="field-label">Score</span>

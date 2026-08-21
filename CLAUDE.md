@@ -111,6 +111,20 @@ Digitises the school's annual appraisal: a teacher (or support-staff member) com
 and goals; their **coach** (= the `performance_manager_email` on their `StaffMember`) reviews and
 signs off.
 
+> **Client-facing terminology (important):** the feature is presented to users as **"Goal Setting and
+> Review"** — every heading, nav label, page title, and Django-admin label (the latter via
+> `AppraisalsConfig.verbose_name` and `Appraisal.Meta.verbose_name`). **All code deliberately keeps the
+> term "appraisal"** — the `appraisals` app, the `Appraisal` model/table, URL names (`appraisals:…`),
+> and the `appraisal-sub` CSS class. Change display *strings* only; never rename the identifiers. The
+> client dislikes "appraisal" for political reasons but the code term is load-bearing, so the two are
+> intentionally decoupled — don't "tidy" the code to match the UI wording.
+
+> **Admin "Review at a glance":** `SelfReviewAdmin` renders a read-only Section / Criterion / Score /
+> Evidence table (`render_self_review_table` in `admin.py`), because a self-review's 1-3 score lives on
+> the child `SelfReviewBullet`, which Django's default inlines never surface next to the parent item's
+> shared `evidence` field. The item inline/changelist also expose a `scores` column. The table is
+> `mark_safe`, so staff-entered evidence/criterion text is HTML-escaped.
+
 ### Models (`appraisals/models.py`)
 - `AcademicYear` — `start_year` (unique int, e.g. 2025 → "2025/26"); one row may be `is_current`
   (enforced single-current in `save()`). Drives the current/previous split.
@@ -122,7 +136,9 @@ signs off.
 - `Goal` — one record carries **both** a goal's setup (title/steps/criteria) **and** its end-of-cycle
   review comments (teacher + coach), so the same goal is "This Year" when set and "Last Year" when
   reviewed. Types: STANDARDS/PERSONAL/LEADERSHIP. Goal 1's wording defaults to the module constant
-  `DEFAULT_STANDARDS_GOAL`.
+  `DEFAULT_STANDARDS_GOAL`. Because one row spans two years, the review comments are editable from
+  **two** places: the current appraisal's Goals tab (its own goals) and the Last Year tab (the
+  *previous* appraisal's goals) — see "Reviewing last year's goals" below.
 - `SelfReview` (OneToOne with `Appraisal`) seeds a two-level descriptor tree via `seed_items()`:
   `SelfReviewItem` is a TS-group/numbered-row container (`heading` + one shared `evidence` field per
   group) and `SelfReviewBullet` (FK `self_review_item`, `related_name="bullets"`) is one individually
@@ -144,9 +160,11 @@ signs off.
   field (`ETHICS`/`STANDARDS`); each row carries its `score` (`null`/1-3, same scale as
   `SelfReviewBullet`), free-text `examples`, and a newline-joined `descriptors` snapshot (read-only
   prompts, exposed as `descriptor_list`). Standards rows additionally carry a `not_applicable` ("Not in
-  Job Role") toggle; `save()` forces `score=None` when set (so an N/A standard is never scored
-  regardless of the client-side greying). Ethics rows leave `not_applicable` at its default (the toggle
-  isn't rendered for them). Uniqueness is `(leader_review, section, number)`; default ordering is
+  job role") flag, rendered as a plain **tick box** (`LeaderStandardForm` overrides it as a
+  `forms.BooleanField`; it is deliberately *not* in `segmented_fields`, since that conversion turns the
+  initial into a choice string and the string `"false"` is truthy to a `BooleanField`). `save()` forces
+  `score=None` when set (so an N/A standard is never scored regardless of the client-side greying).
+  Ethics rows leave `not_applicable` at its default (the tick box isn't rendered for them). Uniqueness is `(leader_review, section, number)`; default ordering is
   `(section, order)` so Ethics sorts before Standards. `seed_standards()` guards **per row** (by
   `(section, number)`), so re-running back-fills any missing rows — e.g. adds the Ethics rows to a
   review that was seeded before Section 1 became scored. Seeding is called from views like the others.
@@ -181,12 +199,25 @@ signs off.
   item+bullet forms (above) **or** the leader forms — a single `LeaderStandardFormSet` (inline off
   `LeaderReview`, so no bullet second-hop) covering all 13 scored rows (3 Ethics + 10 Standards).
   `_tab_leader_review.html` iterates that one formset twice, filtering on `sform.instance.section` to
-  render Section 1 (Ethics: score + examples, no N/A toggle) and Section 2 (Standards: N/A + score +
-  examples) separately. `_tab_self_review.html` switches on the `is_leader` context flag to include
+  render Section 1 (Ethics: score + examples, no N/A tick box) and Section 2 (Standards: N/A tick box
+  + score + examples) separately. `_tab_self_review.html` switches on the `is_leader` context flag to include
   `_tab_leader_review.html`; `self_review_save` picks its `form_keys` dynamically via
   `_self_review_form_keys` (same endpoint, same teacher-only gate). The Standards N/A greying is
   progressive enhancement (`core/static/core/leader_standards.js`, loaded from `detail.html` only when
   `is_leader`).
+- **Reviewing last year's goals (the Last Year tab)**: because one `Goal` row spans two years, the
+  Last Year tab edits the **previous** appraisal's goals from **this** year's page. `LastYearGoalForm`
+  exposes only the two review-comment fields (the goal's own wording is settled and rendered as
+  read-only context); `LastYearGoalFormSet` is inline off `Appraisal` like `GoalFormSet` but bound to
+  `appraisal.previous()` and given an explicit `prefix="lastyear"` — both are inline off `Appraisal`,
+  so both would otherwise default to prefix `goals`, and every panel is rendered into the same page.
+  **The gate is `_can_edit_last_year`, which checks the *current* appraisal's role and lock, not last
+  year's** — a deliberate decision: last year's appraisal is normally already SIGNED_OFF (and so
+  locked), and honouring that lock would make the review impossible to write. No new IDOR surface: the
+  previous appraisal is always derived server-side via `appraisal.previous()`, never taken from the
+  request, so `last_year_save` still routes through `get_appraisal_or_403` on the URL's pk. The gate
+  also returns False when there is no previous appraisal, so posting to the endpoint 403s instead of
+  crashing on a `None` formset.
 - **Nav**: `appraisals/context_processors.py` exposes `user_is_coach` so `core/.../base.html` shows
   "My Team" (now the combined `team:my_team` page — see "Team app" below) for coaches **or** line
   managers. Mounted at `/appraisals/`.
@@ -205,8 +236,13 @@ for the Headteacher-Standards variant).
   and Standards sections, LEADER→`LeaderReview` selection, the N/A-clears-score rule, and the leader
   save role matrix); plus the first-time self-classify flow (an unclassified staff member
   self-selecting Teaching/Support to start, LEADER never self-selectable, existing type never
-  overwritten). `core/tests.py` covers the SSO auth gate and the `check_readiness` command — no app is
-  now without a test suite.
+  overwritten); plus the admin "Review at a glance" summary (`render_self_review_table`: score +
+  evidence rendered together per criterion, and staff-entered HTML escaped); plus the Last Year goal
+  review (the current-year-lock-not-last-year's rule in both directions, the teacher/coach field split,
+  IDOR, and the no-previous-appraisal 403) and the "Not in job role" tick box (that unticking clears
+  the flag — an unticked box submits no key at all — and that the widget really is a checkbox).
+  `core/tests.py` covers the SSO auth gate and the `check_readiness` command — no app is now without a
+  test suite.
 - Senior-leader open items (deferred, not blocking): there is no overall/average score roll-up across
   the standards yet (`not_applicable` is modelled so an N/A-excluding average can be added later); and
   a leader still sees the appraisal's fixed **Goals** tab — hiding it for leaders is a possible

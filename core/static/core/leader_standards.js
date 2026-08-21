@@ -1,19 +1,16 @@
 // Progressive enhancement for the senior-leader self-review (Section 2).
-// Grey out a standard's score row while it is marked "Not in job role".
+// Grey out a standard's score row while its "Not in job role" box is ticked.
 // Correctness is enforced server-side (score is nulled on save); this is
 // purely a visual cue.
 (function () {
   document.addEventListener('DOMContentLoaded', function () {
     document.querySelectorAll('[data-leader-standard]').forEach(function (card) {
-      var radios = card.querySelectorAll('input[name$="-not_applicable"]');
-      if (!radios.length) return;
+      var box = card.querySelector('input[type="checkbox"][name$="-not_applicable"]');
+      if (!box) return;
       function sync() {
-        var na = card.querySelector('input[name$="-not_applicable"]:checked');
-        card.classList.toggle('is-na', !!na && na.value === 'true');
+        card.classList.toggle('is-na', box.checked);
       }
-      radios.forEach(function (radio) {
-        radio.addEventListener('change', sync);
-      });
+      box.addEventListener('change', sync);
       sync();
     });
   });

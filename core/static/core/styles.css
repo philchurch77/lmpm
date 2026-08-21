@@ -2416,6 +2416,30 @@ summary:focus-visible {
 }
 .descriptor-list li { margin: 0 0 4px; }
 
+/* Tick box + label on one line (e.g. the leader standards "Not in job role"). */
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  margin: 0;
+}
+.check-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--colour-primary);
+  cursor: pointer;
+}
+.check-row input[type="checkbox"]:disabled { cursor: default; }
+.check-row:has(input:disabled) { opacity: 0.6; cursor: default; }
+.check-row-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--colour-heading);
+}
+
 /* A standard marked "Not in job role" greys out its (disabled) score row. */
 .leader-standard.is-na .leader-standard-score {
   opacity: 0.4;

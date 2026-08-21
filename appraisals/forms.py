@@ -165,6 +165,29 @@ class GoalForm(RoleGatedForm):
         }
 
 
+class LastYearGoalForm(RoleGatedForm):
+    """Review comments only, for a goal set in the *previous* academic year.
+
+    The same `Goal` row carries a goal's setup and its end-of-cycle review, so
+    reviewing last year's goals means editing last year's `Goal` rows from this
+    year's appraisal page. Only the two review-comment fields are exposed —
+    the goal's own wording (title/steps/criteria) is settled and is rendered as
+    read-only context in the template — and the teacher/coach split matches
+    `GoalForm`.
+    """
+
+    teacher_fields = ("teacher_review_comment",)
+    coach_fields = ("coach_review_comment",)
+
+    class Meta:
+        model = Goal
+        fields = ("teacher_review_comment", "coach_review_comment")
+        widgets = {
+            "teacher_review_comment": forms.Textarea(attrs={"rows": 4}),
+            "coach_review_comment": forms.Textarea(attrs={"rows": 4}),
+        }
+
+
 class AppraisalSummaryForm(RoleGatedForm):
     teacher_fields = ("cpd_requirements", "summary_teacher_comment")
     coach_fields = (
@@ -221,6 +244,14 @@ GoalFormSet = forms.inlineformset_factory(
     Appraisal, Goal, form=GoalForm, extra=0, can_delete=False
 )
 
+# The same goal rows as GoalFormSet but bound to the *previous* appraisal and
+# exposing only the review comments. Given an explicit prefix because both
+# formsets are inline off Appraisal (so both would otherwise default to "goals")
+# and both panels are rendered into the same page.
+LastYearGoalFormSet = forms.inlineformset_factory(
+    Appraisal, Goal, form=LastYearGoalForm, extra=0, can_delete=False
+)
+
 SelfReviewItemFormSet = forms.inlineformset_factory(
     SelfReview, SelfReviewItem, form=SelfReviewItemForm, extra=0, can_delete=False
 )
@@ -242,15 +273,24 @@ class LeaderStandardForm(RoleGatedForm):
     free-text Examples box (all reviewee-owned).
 
     `title`/`descriptors` are read-only prompt text, rendered from the instance
-    rather than as editable fields. `not_applicable` is only rendered for the
-    Standards section; Ethics rows leave it at its default False.
+    rather than as editable fields. `not_applicable` is a tick box and is only
+    rendered for the Standards section; Ethics rows leave it at its default
+    False.
     """
 
     teacher_fields = ("score", "not_applicable", "examples")
-    segmented_fields = ("score", "not_applicable")
+    segmented_fields = ("score",)
 
     score = _score_field()
-    not_applicable = _yesno_field()
+    # A plain tick box, not a Yes/No pill pair: unticked and an explicit "No"
+    # always meant the same thing, so the second option was noise. Deliberately
+    # NOT listed in `segmented_fields` — that conversion turns the initial into
+    # a choice string, and the string "false" is truthy to a BooleanField.
+    not_applicable = forms.BooleanField(
+        required=False,
+        label="Not in job role",
+        widget=forms.CheckboxInput,
+    )
 
     class Meta:
         model = LeaderStandard
