@@ -1,5 +1,5 @@
 /* Client-side word limit guard with live counter (ES5).
-   - Default: 300 words (matches server-side MAX_TEXTAREA_WORDS).
+   - Default: 1200 words (client-side guide only; not enforced server-side).
    - Override per field: data-max-words="150".
    - Opt out (no limit, no counter): data-max-words="0".
 */
@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  var DEFAULT_MAX_WORDS = 300;
+  var DEFAULT_MAX_WORDS = 1200;
 
   function parseMaxWords(textarea) {
     var raw = textarea.getAttribute("data-max-words");
