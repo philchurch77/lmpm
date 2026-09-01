@@ -1087,6 +1087,22 @@ class ClearBlankReviewCellsTests(TestCase):
         self.assertEqual(batch.import_type, ImportType.STAFF)
         self.assertFalse(batch.clear_blank_fields)
 
+    # The form offering the field is not enough: it must also reach the page.
+    # This regressed once — the template rendered only {{ form.csv_file }}, so
+    # the option was unreachable and every goals import silently ran with
+    # blanks-leave-alone, which is the opposite of what the operator chose.
+    def test_clear_option_is_rendered_on_the_goals_upload_page(self):
+        html = self.client.get(
+            reverse("data_import:upload", args=["goals"])
+        ).content.decode()
+        self.assertIn('name="clear_blank_fields"', html)
+        self.assertIn('type="checkbox"', html)
+
+        staff_html = self.client.get(
+            reverse("data_import:upload", args=["staff"])
+        ).content.decode()
+        self.assertNotIn("clear_blank_fields", staff_html)
+
     # --- persistence ------------------------------------------------------
 
     # Catches the flag being honoured from the request rather than from the

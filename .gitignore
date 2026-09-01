@@ -41,3 +41,8 @@ Thumbs.db
 # One-off data-correction records — hold staff performance commentary.
 # The command refuses to write inside the repo; this catches stray copies.
 goal-review-move*.json
+
+# CSV exports/imports hold named staff performance commentary. A commit here
+# deploys to production, so no CSV is tracked except the blank column templates.
+*.csv
+!docs/import_templates/*.csv

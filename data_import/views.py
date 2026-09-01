@@ -85,7 +85,16 @@ def import_upload(request, slug):
     return render(
         request,
         "data_import/upload.html",
-        {"form": form, "slug": slug, "import_type": import_type, "label": label},
+        {
+            "form": form,
+            "slug": slug,
+            "import_type": import_type,
+            "label": label,
+            # Drives whether the template renders the clear-blanks checkbox.
+            # An explicit flag, not a truthiness test on the bound field, since
+            # the field is popped from the form entirely for other types.
+            "allow_clear_blanks": allow_clear_blanks,
+        },
     )
 
 

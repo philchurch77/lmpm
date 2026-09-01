@@ -22,6 +22,15 @@
             <p class="descriptor-text">{{ form.csv_file.errors|join:" " }}</p>
           {% endif %}
         </div>
+        {% if allow_clear_blanks %}
+          <div class="form-field">
+            <label for="id_clear_blank_fields">
+              {{ form.clear_blank_fields }}
+              {{ form.clear_blank_fields.label }}
+            </label>
+            <p class="descriptor-text">{{ form.clear_blank_fields.help_text }}</p>
+          </div>
+        {% endif %}
         <div class="form-actions">
           <a class="filter-clear" href="{% url 'data_import:hub' %}">Cancel</a>
           <button type="submit">Upload &amp; preview</button>
