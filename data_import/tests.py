@@ -39,6 +39,7 @@ from line_management.models import LineMeeting
 from .models import ImportBatch, ImportRow, ImportType
 from .parsers import ImportFileError, parse_csv
 from .services import confirm_batch
+from .views import SLUGS
 
 
 def make_user(email, *, is_superuser=False):
@@ -937,3 +938,176 @@ class DiscardAndDoubleDecisionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         batch.refresh_from_db()
         self.assertEqual(batch.status, ImportBatch.Status.CONFIRMED)
+
+
+class ClearBlankReviewCellsTests(TestCase):
+    """``ImportBatch.clear_blank_fields``: the one destructive import option.
+
+    Every other import obeys "a blank cell never overwrites" (see
+    docs/import_templates.md), which makes an import incapable of deleting
+    data. This flag inverts that for two named fields on one batch, so it is
+    the only route by which an upload can erase a coach's or teacher's written
+    comment. The tests below pin all four halves of the rule: that it is off
+    by default, that it works when on, that it is confined to the two review
+    fields, and that it only ever acts on a cell that is actually present in
+    the file.
+    """
+
+    def setUp(self):
+        self.super_user = make_user("admin@oxlip.test", is_superuser=True)
+        self.client.force_login(self.super_user)
+        self.teacher = make_staff(
+            "teacher@oxlip.test", staff_type=StaffMember.StaffType.TEACHING
+        )
+        self.year = make_academic_year(2025)
+        self.appraisal = make_appraisal(self.teacher, self.year)
+
+        # The STANDARDS goal is order 1 (GOAL_TYPE_ORDER), fully populated so
+        # every field has something to lose.
+        self.goal = self.appraisal.goals.get(order=1)
+        self.goal.title = "Meet the teacher standards"
+        self.goal.steps_to_success = "Observe, plan, review."
+        self.goal.success_criteria = "All standards evidenced by July."
+        self.goal.teacher_review_comment = "I believe I have met these."
+        self.goal.coach_review_comment = "Agreed — met in full."
+        self.goal.save()
+
+    # --- helpers ----------------------------------------------------------
+
+    def _upload(self, header, *rows, clear_blanks=False, slug="goals"):
+        """POST a CSV to an upload view, optionally ticking the clear box."""
+        data = {"csv_file": make_csv(header, *rows)}
+        if clear_blanks:
+            data["clear_blank_fields"] = "on"
+        response = self.client.post(
+            reverse("data_import:upload", args=[slug]), data, follow=True
+        )
+        self.assertEqual(response.status_code, 200)
+        return ImportBatch.objects.filter(import_type=SLUGS[slug]).latest("uploaded_at")
+
+    def _refresh(self):
+        self.goal.refresh_from_db()
+        return self.goal
+
+    # --- the default: a blank never overwrites ----------------------------
+
+    # Catches the documented default silently becoming destructive: without the
+    # flag, a blank review cell must leave the stored comment exactly as it is.
+    # Every historical import relied on this, so it is a regression pin.
+    def test_blank_review_cell_does_not_clear_the_comment_by_default(self):
+        batch = self._upload(
+            "teacher_email,academic_year,goal_type,coach_review_comment",
+            "teacher@oxlip.test,2025,STANDARDS,",
+        )
+        self.assertFalse(batch.clear_blank_fields)
+
+        confirm_batch(batch)
+
+        self.assertEqual(self._refresh().coach_review_comment, "Agreed — met in full.")
+
+    # --- the flag on ------------------------------------------------------
+
+    # Catches the feature not working at all: with the flag on, a present but
+    # empty review cell is the operator saying "remove this", and must.
+    def test_blank_review_cell_clears_the_comment_when_flag_is_on(self):
+        batch = self._upload(
+            "teacher_email,academic_year,goal_type,coach_review_comment,teacher_review_comment",
+            "teacher@oxlip.test,2025,STANDARDS,,",
+            clear_blanks=True,
+        )
+        self.assertTrue(batch.clear_blank_fields)
+
+        confirm_batch(batch)
+
+        goal = self._refresh()
+        self.assertEqual(goal.coach_review_comment, "")
+        self.assertEqual(goal.teacher_review_comment, "")
+
+    # Catches the flag being applied to every text field rather than the two
+    # review comments: an operator removing a misattributed review must not be
+    # able to erase the goal itself with the same upload. Each field is
+    # asserted separately so a partial regression cannot hide.
+    def test_flag_never_clears_title_steps_or_success_criteria(self):
+        batch = self._upload(
+            "teacher_email,academic_year,goal_type,title,steps_to_success,"
+            "success_criteria,coach_review_comment",
+            "teacher@oxlip.test,2025,STANDARDS,,,,",
+            clear_blanks=True,
+        )
+
+        confirm_batch(batch)
+
+        goal = self._refresh()
+        self.assertEqual(goal.title, "Meet the teacher standards")
+        self.assertEqual(goal.steps_to_success, "Observe, plan, review.")
+        self.assertEqual(goal.success_criteria, "All standards evidenced by July.")
+        # The review comment on the same row still cleared, so the goal fields
+        # survived the flag rather than the flag having failed to apply.
+        self.assertEqual(goal.coach_review_comment, "")
+
+    # Catches "clear" being read from a missing column as well as an empty one:
+    # a narrower export that simply does not mention coach_review_comment must
+    # not wipe it. This is the difference between correcting a file and
+    # truncating the database with one.
+    def test_column_absent_from_the_file_is_never_cleared(self):
+        batch = self._upload(
+            "teacher_email,academic_year,goal_type,teacher_review_comment",
+            "teacher@oxlip.test,2025,STANDARDS,",
+            clear_blanks=True,
+        )
+
+        confirm_batch(batch)
+
+        goal = self._refresh()
+        # Present-and-empty: cleared.
+        self.assertEqual(goal.teacher_review_comment, "")
+        # Absent from the header entirely: untouched.
+        self.assertEqual(goal.coach_review_comment, "Agreed — met in full.")
+
+    # --- where the option is offered --------------------------------------
+
+    # Catches the destructive option leaking onto other import types — and,
+    # more importantly, catches it being merely hidden rather than removed: a
+    # hand-crafted POST to a non-goals upload must not switch it on.
+    def test_clear_option_is_offered_on_goals_upload_only(self):
+        goals_form = self.client.get(
+            reverse("data_import:upload", args=["goals"])
+        ).context["form"]
+        self.assertIn("clear_blank_fields", goals_form.fields)
+
+        staff_form = self.client.get(
+            reverse("data_import:upload", args=["staff"])
+        ).context["form"]
+        self.assertNotIn("clear_blank_fields", staff_form.fields)
+
+        # Posting the value anyway to a staff upload must be ignored, not honoured.
+        batch = self._upload(
+            "email", "newstarter@oxlip.test", clear_blanks=True, slug="staff"
+        )
+        self.assertEqual(batch.import_type, ImportType.STAFF)
+        self.assertFalse(batch.clear_blank_fields)
+
+    # --- persistence ------------------------------------------------------
+
+    # Catches the flag being honoured from the request rather than from the
+    # stored batch. Upload and confirm are separate requests, possibly by
+    # different people; the decision recorded at upload is the one that must
+    # run, and it must be recorded on the batch as the audit trail of who
+    # chose it.
+    def test_flag_is_persisted_on_the_batch_and_read_from_it_at_confirm(self):
+        batch = self._upload(
+            "teacher_email,academic_year,goal_type,coach_review_comment",
+            "teacher@oxlip.test,2025,STANDARDS,",
+            clear_blanks=True,
+        )
+
+        stored = ImportBatch.objects.get(pk=batch.pk)
+        self.assertTrue(stored.clear_blank_fields)
+
+        # Flip the stored decision off; confirm must follow the batch, not the
+        # upload request that created it.
+        stored.clear_blank_fields = False
+        stored.save(update_fields=["clear_blank_fields"])
+        confirm_batch(ImportBatch.objects.get(pk=batch.pk))
+
+        self.assertEqual(self._refresh().coach_review_comment, "Agreed — met in full.")

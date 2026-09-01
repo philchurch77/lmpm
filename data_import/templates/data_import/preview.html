@@ -17,6 +17,43 @@
     · <strong>{{ batch.skip_count }}</strong> skipped
   </p>
 
+  {% if batch.clear_blank_fields %}
+    <div class="reflection-card">
+      <div class="reflection-card-header">Blank review cells will clear stored comments</div>
+      <div class="reflection-card-body">
+        <p class="descriptor-text">
+          This upload was made with <strong>&ldquo;Blank review cells clear the stored
+          comment&rdquo;</strong> ticked. Where a row&rsquo;s
+          <code>teacher_review_comment</code> or <code>coach_review_comment</code> is
+          empty, any comment currently stored on that goal will be <strong>erased</strong>
+          rather than left alone. Goal titles, steps and success criteria are not affected.
+        </p>
+        {% if will_clear %}
+          <p class="descriptor-text">
+            <strong>{{ will_clear|length }} goal(s) currently hold a comment that this
+            upload will erase.</strong> Nothing else in the file destroys text.
+          </p>
+          <ul class="descriptor-text">
+            {% for item in will_clear %}
+              <li>row {{ item.row_number }} — {{ item.teacher_email }}
+                ({{ item.goal_type|lower }}): {{ item.fields }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="descriptor-text">
+            No goal currently holds a comment that this upload would erase, so the
+            option has no destructive effect on this file.
+          </p>
+        {% endif %}
+
+        <p class="descriptor-text">
+          If that is not what you intended, discard this batch and re-upload without the
+          option ticked.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+
   {% if batch.status == "PENDING" %}
     <form method="post">
       {% csrf_token %}

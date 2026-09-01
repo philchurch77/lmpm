@@ -57,16 +57,29 @@ def normalise_email(value: str) -> str:
     return (value or "").strip().lower()
 
 
-def _set_if_present(data: dict, defaults: dict, field_name: str, transform=str.strip) -> None:
+def _set_if_present(
+    data: dict, defaults: dict, field_name: str, transform=str.strip, clear_blanks=False
+) -> None:
     """Write ``defaults[field_name]`` only when the CSV cell is non-blank.
 
     Shared by every ``apply_*`` function so "a blank cell must not overwrite
     an existing non-blank value" (see docs/import_templates.md) is enforced
     identically everywhere, rather than re-spelled per import type.
+
+    ``clear_blanks`` inverts that for one field on one batch: a blank cell then
+    CLEARS the stored value. It is the only way to remove text via an import,
+    and is off unless the operator ticked it on the upload form — see
+    ``ImportBatch.clear_blank_fields``. A column absent from the CSV entirely is
+    never cleared, only one present-and-empty, so a narrower file cannot wipe
+    fields it does not mention.
     """
+    if field_name not in data:
+        return
     raw = data.get(field_name, "")
     if raw.strip():
         defaults[field_name] = transform(raw)
+    elif clear_blanks:
+        defaults[field_name] = ""
 
 
 def _set_bool_if_present(data: dict, defaults: dict, field_name: str) -> None:
@@ -291,19 +304,87 @@ def validate_goals_row(data: dict, uploaded_by_email: str = "") -> ValidationRes
 
 def apply_goals_row(data: dict, resolved: dict):
     defaults = {"goal_type": resolved["goal_type"]}
-    for text_field in (
-        "title",
-        "steps_to_success",
-        "success_criteria",
-        "teacher_review_comment",
-        "coach_review_comment",
-    ):
+    for text_field in ("title", "steps_to_success", "success_criteria"):
         _set_if_present(data, defaults, text_field)
+
+    # The batch's clear_blank_fields flag applies ONLY to the two review
+    # comments. A blank title or success criterion still leaves the existing
+    # value alone: those describe the goal itself, and an operator correcting
+    # misattributed review text must not be able to erase the goal with it.
+    clear_blanks = resolved.get("clear_blank_fields", False)
+    for text_field in ("teacher_review_comment", "coach_review_comment"):
+        _set_if_present(data, defaults, text_field, clear_blanks=clear_blanks)
 
     goal, _ = Goal.objects.update_or_create(
         appraisal=resolved["appraisal"], order=resolved["order"], defaults=defaults
     )
     return ImportedModel.GOAL, goal.pk
+
+
+def clearing_preview(batch: ImportBatch) -> list[dict]:
+    """Which rows of a clear-blanks goals batch will actually erase stored text.
+
+    The preview page warns *that* a batch clears blanks, but an ``UPDATE`` badge
+    looks identical whether the row adds a comment or destroys one. This names
+    the rows that will genuinely erase something, so the operator confirms
+    knowing the scale rather than the principle.
+
+    Read-only, and returns [] for any batch that is not a clearing goals batch.
+    One bulk query rather than a lookup per row.
+    """
+    if batch.import_type != ImportType.GOALS or not batch.clear_blank_fields:
+        return []
+
+    rows = list(batch.rows.exclude(outcome=ImportRow.Outcome.SKIP).order_by("row_number"))
+    emails = {normalise_email(r.raw_json.get("teacher_email", "")) for r in rows}
+    years = {
+        int(raw)
+        for r in rows
+        if (raw := r.raw_json.get("academic_year", "").strip()).isdigit()
+    }
+    if not emails or not years:
+        return []
+
+    goals = Goal.objects.filter(
+        appraisal__teacher__email__in=emails,
+        appraisal__academic_year__start_year__in=years,
+    ).select_related("appraisal__teacher", "appraisal__academic_year")
+    index = {
+        (g.appraisal.teacher.email.lower(), g.appraisal.academic_year.start_year, g.order): g
+        for g in goals
+    }
+
+    affected = []
+    for row in rows:
+        data = row.raw_json
+        email = normalise_email(data.get("teacher_email", ""))
+        year_raw = data.get("academic_year", "").strip()
+        order = GOAL_TYPE_ORDER.get(data.get("goal_type", "").strip().upper())
+        if not (email and year_raw.isdigit() and order):
+            continue
+
+        goal = index.get((email, int(year_raw), order))
+        if goal is None:
+            continue
+
+        # Present-and-empty in the file, non-blank in the database: this row
+        # will destroy text. An absent column clears nothing (_set_if_present).
+        losing = [
+            name
+            for name in ("teacher_review_comment", "coach_review_comment")
+            if name in data and not data[name].strip() and getattr(goal, name).strip()
+        ]
+        if losing:
+            affected.append(
+                {
+                    "row_number": row.row_number,
+                    "teacher_email": email,
+                    "goal_type": data.get("goal_type", "").strip().upper(),
+                    "fields": ", ".join(n.replace("_", " ") for n in losing),
+                }
+            )
+
+    return affected
 
 
 # --- Self-review -----------------------------------------------------------
@@ -580,7 +661,13 @@ def _mark_applied(row: ImportRow, outcome: str, model_name: str, pk: int) -> Non
     row.save(update_fields=["outcome", "created_object_model", "created_object_pk"])
 
 
-def _confirm_one_row(row: ImportRow, validate_fn, apply_fn, uploaded_by_email: str = "") -> None:
+def _confirm_one_row(
+    row: ImportRow,
+    validate_fn,
+    apply_fn,
+    uploaded_by_email: str = "",
+    clear_blank_fields: bool = False,
+) -> None:
     """Re-validate, then apply, one row's planned outcome.
 
     Shared by every import type's confirm loop, including self-review's (via
@@ -592,6 +679,10 @@ def _confirm_one_row(row: ImportRow, validate_fn, apply_fn, uploaded_by_email: s
     if not result.ok:
         _skip_row(row, "; ".join(result.errors) or "No longer valid at confirm time.")
         return
+
+    # Carried on `resolved` rather than as an apply_fn argument so the five
+    # apply functions keep one shared signature; only apply_goals_row reads it.
+    result.resolved["clear_blank_fields"] = clear_blank_fields
 
     try:
         with transaction.atomic():
@@ -650,7 +741,13 @@ def confirm_batch(batch: ImportBatch) -> None:
         validate_fn, apply_fn = IMPORTERS[batch.import_type]
         uploaded_by_email = getattr(batch.uploaded_by, "email", "") or ""
         for row in rows:
-            _confirm_one_row(row, validate_fn, apply_fn, uploaded_by_email)
+            _confirm_one_row(
+                row,
+                validate_fn,
+                apply_fn,
+                uploaded_by_email,
+                clear_blank_fields=batch.clear_blank_fields,
+            )
 
     batch.status = ImportBatch.Status.CONFIRMED
     batch.confirmed_at = timezone.now()

@@ -15,6 +15,24 @@ General rules for every file:
 - Blank cells leave the corresponding field blank/default — they do not
   overwrite an existing non-blank value with blank on re-import (update-on-
   conflict only replaces a field when the CSV cell is non-empty).
+- **One opt-in exception.** The goals upload offers a *"Blank review cells clear
+  the stored comment"* tick box. With it on, for that batch only, a
+  present-but-empty `teacher_review_comment` or `coach_review_comment` **erases**
+  what is stored, instead of leaving it alone. It exists so misattributed review
+  text can be removed via an import; it is the only way to erase text this way.
+  Three limits apply, deliberately:
+  - It never touches `title`, `steps_to_success` or `success_criteria`, so a
+    sparse file cannot wipe the goals themselves.
+  - It is offered on the goals upload only. On other types the field is removed
+    from the form entirely, so a crafted POST cannot switch it on.
+  - A column **absent** from the CSV clears nothing — only one present and
+    empty. *Present and empty* means "make this blank"; *absent* means "I am not
+    talking about this field". Note that a ragged row (fewer cells than the
+    header) is padded to empty by the CSV reader, so it counts as present and
+    empty — export full-width rows when using this option.
+
+  The flag is recorded on the batch and shown on the import preview and in the
+  Django admin batch list, so a clearing run is identifiable afterwards.
 - Re-running the same file (or a corrected version) is safe: rows are matched
   to existing records and updated, not duplicated.
 

@@ -18,7 +18,7 @@ from .forms import CsvUploadForm
 from .models import ImportBatch, ImportRow, ImportType
 from .parsers import ImportFileError, parse_csv
 from .permissions import require_importer
-from .services import build_rows_for_batch, confirm_batch
+from .services import build_rows_for_batch, clearing_preview, confirm_batch
 
 # URL-facing slugs for each import type, in upload order.
 SLUGS = {
@@ -57,8 +57,14 @@ def import_upload(request, slug):
     import_type = _import_type_or_404(slug)
     label = ImportType(import_type).label
 
+    # The "blank cells clear the comment" option is offered on the goals upload
+    # only; every other type keeps the standard "a blank never overwrites" rule.
+    allow_clear_blanks = import_type == ImportType.GOALS
+
     if request.method == "POST":
-        form = CsvUploadForm(request.POST, request.FILES)
+        form = CsvUploadForm(
+            request.POST, request.FILES, allow_clear_blanks=allow_clear_blanks
+        )
         if form.is_valid():
             try:
                 parsed_rows = parse_csv(form.cleaned_data["csv_file"], import_type)
@@ -69,11 +75,12 @@ def import_upload(request, slug):
                     import_type=import_type,
                     uploaded_by=request.user,
                     original_filename=form.cleaned_data["csv_file"].name,
+                    clear_blank_fields=form.cleaned_data.get("clear_blank_fields", False),
                 )
                 build_rows_for_batch(batch, parsed_rows)
                 return redirect("data_import:preview", batch_id=batch.pk)
     else:
-        form = CsvUploadForm()
+        form = CsvUploadForm(allow_clear_blanks=allow_clear_blanks)
 
     return render(
         request,
@@ -116,5 +123,10 @@ def import_preview(request, batch_id):
             "total_rows": total_rows,
             "truncated": total_rows > PREVIEW_ROW_LIMIT,
             "outcomes": ImportRow.Outcome,
+            # Empty unless this is a goals batch uploaded with "blank review
+            # cells clear the stored comment" ticked. Names the rows that will
+            # genuinely destroy text, so the warning states a scale, not just a
+            # principle.
+            "will_clear": clearing_preview(batch),
         },
     )

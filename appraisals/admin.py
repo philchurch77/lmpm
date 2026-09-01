@@ -1,10 +1,17 @@
+import json
+from datetime import datetime
+
 from django.contrib import admin, messages
-from django.shortcuts import redirect
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.core.exceptions import PermissionDenied
+from django.http import HttpResponse
+from django.shortcuts import redirect, render
 from django.template.defaultfilters import linebreaksbr
 from django.urls import path
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
+from .goal_review_fix import apply_plan, build_plan, plan_counts, restrict_to_approved
 from .models import (
     AcademicYear,
     Appraisal,
@@ -20,7 +27,7 @@ class AcademicYearAdmin(admin.ModelAdmin):
     list_display = ("__str__", "start_year", "is_current")
     list_filter = ("is_current",)
     search_fields = ("start_year", "label")
-    actions = ("set_as_current_year",)
+    actions = ("set_as_current_year", "move_misplaced_goal_reviews")
     # Custom changelist template adds the "Start next academic year" button.
     change_list_template = "admin/appraisals/academicyear/change_list.html"
 
@@ -36,7 +43,16 @@ class AcademicYearAdmin(admin.ModelAdmin):
         return custom + urls
 
     def start_next_year_view(self, request):
-        """One-click: create the next academic year and make it current."""
+        """One-click: create the next academic year and make it current.
+
+        Superuser-only. ``admin_site.admin_view`` checks ``is_staff`` and
+        nothing else, so without this any staff user could roll the trust over
+        to a new academic year — which changes what every appraisal view shows.
+        """
+        if not request.user.is_superuser:
+            raise PermissionDenied(
+                "Starting a new academic year is restricted to administrators."
+            )
         year, created = AcademicYear.start_next()
         verb = "Started" if created else "Switched to"
         self.message_user(
@@ -63,6 +79,112 @@ class AcademicYearAdmin(admin.ModelAdmin):
             request,
             f"{year} is now the current academic year.",
             level=messages.SUCCESS,
+        )
+
+    @admin.action(
+        # Keeps the action off the dropdown for a view-only user. This is the
+        # UI tidy-up, NOT the security boundary — Django appends any action
+        # without `allowed_permissions` unconditionally, and the changelist
+        # itself admits view-only users. The explicit check below is the gate.
+        permissions=["change"],
+        description="Move misplaced goal reviews to the previous year",
+    )
+    def move_misplaced_goal_reviews(self, request, queryset):
+        """Browser front end for the one-off goal-review correction.
+
+        The decision rules live in ``appraisals.goal_review_fix`` and are shared
+        with the ``move_prior_year_goal_reviews`` management command. This exists
+        because the operator may have no console access, and a correction to live
+        performance data should not depend on one.
+
+        Preview first, confirm second. The plan is rebuilt on confirm so the
+        edited-since-import guard is re-evaluated against current data, then
+        narrowed to the goals the operator actually saw — so the applied set can
+        never be larger than the approved one.
+
+        Restricted to superusers. Django's admin gates the changelist on *view*
+        permission and appends actions without ``allowed_permissions``
+        unconditionally, so without this check a staff user with read-only
+        access to Academic years could rewrite goal review commentary across the
+        whole trust and download every staff member's comments. Permission on
+        AcademicYear is also the wrong model to gate on — the action rewrites
+        Appraisal and Goal.
+        """
+        if not request.user.is_superuser:
+            raise PermissionDenied(
+                "Correcting goal review data is restricted to administrators."
+            )
+
+        if queryset.count() != 1:
+            self.message_user(
+                request,
+                "Select exactly one academic year — the one whose goals wrongly "
+                "hold the reviews (e.g. 2025/26).",
+                level=messages.ERROR,
+            )
+            return None
+
+        source_year = queryset.first()
+        to_start = source_year.start_year - 1
+        plans = build_plan(source_year, to_start)
+        counts = plan_counts(plans)
+
+        if request.POST.get("confirm"):
+            approved = {
+                int(pk) for pk in request.POST.getlist("approved_goal") if pk.isdigit()
+            }
+            plans, newly_appeared = restrict_to_approved(plans, approved)
+
+            record = apply_plan(plans, to_start)
+            record["not_applied_new_since_preview"] = [
+                {"teacher_email": email, "goal_order": order}
+                for email, order in newly_appeared
+            ]
+
+            # A server-side trace of the mutation, so "who changed my review, and
+            # when" is answerable from the system rather than from someone's
+            # Downloads folder. Deliberately counts and pks only — the commentary
+            # itself stays in the operator's download.
+            self.log_change(
+                request,
+                source_year,
+                f"Moved {record['moved_goals']} goal review(s) across "
+                f"{record['moved_appraisals']} appraisal(s) into "
+                f"{record['target_year']}. Source goal pks: "
+                + ", ".join(
+                    str(g["source_goal_pk"])
+                    for a in record["appraisals"]
+                    for g in a.get("goals", [])
+                ),
+            )
+
+            # Returned as a download rather than written to disk: on Azure the
+            # working directory is a disposable temp extract, and this file holds
+            # named staff performance commentary that should not linger on the
+            # server. The record doubles as the run's summary.
+            payload = json.dumps(record, indent=2, ensure_ascii=False)
+            response = HttpResponse(payload, content_type="application/json")
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            response["Content-Disposition"] = (
+                f'attachment; filename="goal-review-move-{stamp}.json"'
+            )
+            return response
+
+        return render(
+            request,
+            "admin/appraisals/academicyear/move_goal_reviews.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": "Move misplaced goal reviews",
+                "source_year": source_year,
+                "target_label": f"{to_start}/{str(to_start + 1)[-2:]}",
+                "counts": counts,
+                "movable": [p for p in plans if p.moves],
+                "flagged": [p for p in plans if p.is_flagged],
+                "blocked": [p for p in plans if p.blocked],
+                "queryset": queryset,
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            },
         )
 
 

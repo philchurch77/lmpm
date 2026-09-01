@@ -1,0 +1,114 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label='appraisals' %}">Goal Setting and Review</a>
+    &rsaquo; <a href="{% url 'admin:appraisals_academicyear_changelist' %}">Academic years</a>
+    &rsaquo; Move misplaced goal reviews
+  </div>
+{% endblock %}
+
+{% block content %}
+  <h1>Move misplaced goal reviews out of {{ source_year }}</h1>
+
+  <p>
+    Review comments currently stored on the <strong>{{ source_year }}</strong> goals will be
+    moved onto <strong>{{ target_label }}</strong> goals &mdash; the year they actually review.
+    They will then appear on the {{ source_year }} &ldquo;Last Year&rdquo; tab, and the
+    following year&rsquo;s tab will be empty for the coach.
+  </p>
+
+  {% if counts.appraisals %}
+    <div class="module">
+      <h2>What will change</h2>
+      <table>
+        <tr><th>Reviews moved</th><td>{{ counts.goals }}</td></tr>
+        <tr><th>Appraisals affected</th><td>{{ counts.appraisals }}</td></tr>
+        <tr><th>New {{ target_label }} appraisals created</th><td>{{ counts.new_appraisals }}</td></tr>
+        <tr><th>New {{ target_label }} goals created</th><td>{{ counts.new_goals }}</td></tr>
+      </table>
+    </div>
+
+    <div class="module">
+      <h2>Staff affected</h2>
+      <ul>
+        {% for plan in movable %}
+          <li>{{ plan.appraisal.teacher.email }} &mdash; goal(s)
+            {% for move in plan.moves %}{{ move.goal.order }}{% if not forloop.last %}, {% endif %}{% endfor %}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% else %}
+    <p class="errornote">Nothing to move. No further action is needed.</p>
+  {% endif %}
+
+  {% if flagged %}
+    <div class="module">
+      <h2>{{ flagged|length }} appraisal(s) will be skipped &mdash; resolve by hand</h2>
+      <p class="help">
+        These have been edited since the import, so the text may be a coach&rsquo;s own
+        work. Nothing in these appraisals will be touched.
+      </p>
+      <ul>
+        {% for plan in flagged %}
+          <li><strong>{{ plan.appraisal.teacher.email }}</strong>
+            <ul>
+              {% for goal, reason in plan.flagged %}
+                <li>goal {{ goal.order }}: {{ reason }}</li>
+              {% endfor %}
+            </ul>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if blocked %}
+    <div class="module">
+      <h2>Blocked goals</h2>
+      <p class="help">The target goal already holds a review. The source is left as-is.</p>
+      <ul>
+        {% for plan in blocked %}
+          {% for goal, reason in plan.blocked %}
+            <li>{{ plan.appraisal.teacher.email }} &mdash; goal {{ goal.order }}: {{ reason }}</li>
+          {% endfor %}
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if counts.appraisals %}
+    <div class="module">
+      <h2>Before you confirm</h2>
+      <p class="help">
+        Confirming will immediately download a JSON file recording every value moved and
+        every row created. <strong>That file holds named staff performance commentary.</strong>
+        Keep it somewhere controlled, and delete it once the correction is verified.
+      </p>
+    </div>
+
+    <form method="post">
+      {% csrf_token %}
+      {% for obj in queryset %}
+        <input type="hidden" name="{{ action_checkbox_name }}" value="{{ obj.pk }}">
+      {% endfor %}
+      <input type="hidden" name="action" value="move_misplaced_goal_reviews">
+      <input type="hidden" name="confirm" value="yes">
+      {# The exact goals listed above. The plan is rebuilt on confirm so the    #}
+      {# edited-since-import guard is re-checked, but it is then narrowed to    #}
+      {# these — so the applied set can never be wider than the approved one.   #}
+      {% for plan in movable %}{% for move in plan.moves %}
+        <input type="hidden" name="approved_goal" value="{{ move.goal.pk }}">
+      {% endfor %}{% endfor %}
+      <div class="submit-row">
+        <input type="submit" class="default" value="Move {{ counts.goals }} review(s) and download the record">
+        <a href="{% url 'admin:appraisals_academicyear_changelist' %}" class="button cancel-link">Cancel</a>
+      </div>
+    </form>
+  {% else %}
+    <div class="submit-row">
+      <a href="{% url 'admin:appraisals_academicyear_changelist' %}" class="button">Back</a>
+    </div>
+  {% endif %}
+{% endblock %}

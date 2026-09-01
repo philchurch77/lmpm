@@ -15,20 +15,31 @@ email. ``PermissionDenied`` surfaces as HTTP 403 through the test client.
 """
 from __future__ import annotations
 
+import json
+import tempfile
 from datetime import date
+from io import StringIO
+from pathlib import Path
 
-from django.contrib.auth.models import User
+from django.conf import settings
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.contrib.auth.models import Permission, User
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from core.models import StaffMember
+from data_import.models import ImportBatch, ImportedModel, ImportRow, ImportType
 
 from .admin import render_self_review_table
 from .leader_standards_templates import ETHICS_CONTENT, HEADTEACHER_STANDARDS
+from .goal_review_fix import PLACEHOLDER_TITLE, build_plan
 from .models import (
     AcademicYear,
     Appraisal,
+    Goal,
     LeaderReview,
     LeaderStandard,
     SelfReview,
@@ -1293,3 +1304,841 @@ class LastYearGoalReviewTests(TestCase):
             reverse("appraisals:last_year_save", args=[first.pk]), {}
         )
         self.assertEqual(response.status_code, 403)
+
+
+class MovePriorYearGoalReviewsTests(TestCase):
+    """The one-off ``move_prior_year_goal_reviews`` data correction.
+
+    This command runs once, against live production data holding named staff
+    performance commentary, and moves text between rows. There is no undo
+    beyond the backup file, so the tests here are the only safety net it gets.
+
+    The load-bearing rule is ``_edit_reason``: a goal may only move if its
+    stored text still equals the ``ImportRow.raw_json`` that wrote it. Anything
+    else - a human edit, or no import row at all - is live work, and flags the
+    **whole appraisal**. Every fixture below therefore builds real
+    ``ImportBatch`` / ``ImportRow`` rows so that comparison is exercised for
+    real rather than stubbed.
+    """
+
+    def setUp(self):
+        self.super_user = make_user("importadmin@oxlip.test", is_superuser=True)
+
+        # 2025/26 is the year whose goals wrongly hold the reviews; 2026/27 is
+        # the live current year the containment guarantee protects. 2024/25
+        # (the destination) deliberately does NOT exist - the command fabricates
+        # it, and the dry-run test asserts it does not.
+        self.source_year = make_year(2025, is_current=False)
+        self.current_year = make_year(2026, is_current=True)
+
+        self.coach_email = "coach@oxlip.test"
+        self.teacher = make_staff(
+            "teacher@oxlip.test",
+            performance_manager_email=self.coach_email,
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        self.source = make_appraisal(
+            self.teacher, self.source_year, coach_email=self.coach_email
+        )
+
+    # --- fixtures ---------------------------------------------------------
+
+    def _confirmed_batch(self):
+        """A GOALS batch that has actually been confirmed.
+
+        ``_imported_row`` orders by ``batch__confirmed_at``, so an unconfirmed
+        batch would sort unpredictably; set it explicitly.
+        """
+        return ImportBatch.objects.create(
+            import_type=ImportType.GOALS,
+            uploaded_by=self.super_user,
+            status=ImportBatch.Status.CONFIRMED,
+            confirmed_at=timezone.now(),
+        )
+
+    def _imported_goal(
+        self,
+        appraisal,
+        order,
+        *,
+        teacher_text,
+        coach_text,
+        stored_teacher=None,
+        stored_coach=None,
+    ):
+        """Set a goal's review text and record the ImportRow that "wrote" it.
+
+        Pass ``stored_*`` to make the row on disk differ from what the import
+        wrote - i.e. to simulate a human having edited the goal since.
+        """
+        goal = appraisal.goals.get(order=order)
+        goal.teacher_review_comment = (
+            teacher_text if stored_teacher is None else stored_teacher
+        )
+        goal.coach_review_comment = coach_text if stored_coach is None else stored_coach
+        goal.save()
+
+        ImportRow.objects.create(
+            batch=self._confirmed_batch(),
+            import_type=ImportType.GOALS,
+            row_number=order,
+            raw_json={
+                "teacher_email": appraisal.teacher.email,
+                "academic_year": str(appraisal.academic_year.start_year),
+                "goal_type": goal.goal_type,
+                "title": goal.title,
+                "teacher_review_comment": teacher_text,
+                "coach_review_comment": coach_text,
+            },
+            outcome=ImportRow.Outcome.UPDATE,
+            source_row_hash="hash-%s-%s" % (appraisal.pk, order),
+            created_object_model=ImportedModel.GOAL,
+            created_object_pk=goal.pk,
+        )
+        return goal
+
+    def _unimported_goal(self, appraisal, order, *, teacher_text="", coach_text=""):
+        """A goal carrying review text with no ImportRow - created in the app."""
+        goal = appraisal.goals.get(order=order)
+        goal.teacher_review_comment = teacher_text
+        goal.coach_review_comment = coach_text
+        goal.save()
+        return goal
+
+    def _temp_backup(self):
+        """A backup path in a temp dir - never inside the repo."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return str(Path(tmp.name) / "goal-review-move.json")
+
+    def _run(
+        self,
+        *,
+        dry_run=False,
+        teacher_email="",
+        from_year=2025,
+        to_year=2024,
+        backup_file=None,
+    ):
+        if backup_file is None:
+            backup_file = "" if dry_run else self._temp_backup()
+        out, err = StringIO(), StringIO()
+        call_command(
+            "move_prior_year_goal_reviews",
+            dry_run=dry_run,
+            from_year=from_year,
+            to_year=to_year,
+            teacher_email=teacher_email,
+            backup_file=backup_file,
+            stdout=out,
+            stderr=err,
+        )
+        return out.getvalue(), err.getvalue()
+
+    # --- the move itself --------------------------------------------------
+
+    # Catches the correction silently not happening: the review must land on the
+    # prior-year goal, the source must be emptied, and the fabricated goal must
+    # NOT inherit the 2025/26 goal's title (that would invent a goal for a year
+    # the system never held).
+    def test_clean_imported_goal_moves_to_prior_year_and_clears_source(self):
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="I met the standards.",
+            coach_text="Agreed, met.",
+        )
+
+        self._run()
+
+        target_appraisal = Appraisal.objects.get(
+            teacher=self.teacher, academic_year__start_year=2024
+        )
+        target_goal = target_appraisal.goals.get(order=1)
+        self.assertEqual(target_goal.teacher_review_comment, "I met the standards.")
+        self.assertEqual(target_goal.coach_review_comment, "Agreed, met.")
+        self.assertEqual(target_goal.title, PLACEHOLDER_TITLE)
+
+        source_goal = self.source.goals.get(order=1)
+        self.assertEqual(source_goal.teacher_review_comment, "")
+        self.assertEqual(source_goal.coach_review_comment, "")
+
+        # The whole point of the move: previous() must now find the reviews.
+        self.assertEqual(self.source.previous(), target_appraisal)
+
+    # Catches the fabricated prior-year appraisal asserting the LATER year's
+    # coach as the author of an earlier year's review, and catches it being
+    # created editable (DRAFT) for a year that predates the system.
+    def test_created_target_appraisal_does_not_inherit_coach_email(self):
+        self._imported_goal(
+            self.source, 1, teacher_text="Teacher text", coach_text="Coach text"
+        )
+
+        self._run()
+
+        target = Appraisal.objects.get(
+            teacher=self.teacher, academic_year__start_year=2024
+        )
+        self.assertEqual(target.coach_email, "")
+        self.assertNotEqual(target.coach_email, self.source.coach_email)
+        self.assertEqual(target.status, Appraisal.Status.SIGNED_OFF)
+
+    # --- the edit guard ---------------------------------------------------
+
+    # Catches the guard being applied per goal instead of per appraisal: one
+    # edited goal casts doubt on the whole imported row, so its CLEAN siblings
+    # must not move either.
+    def test_edited_goal_freezes_its_whole_appraisal_including_clean_siblings(self):
+        edited_teacher_text = "The coach rewrote this in the app."
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Original imported text",
+            coach_text="Original coach text",
+            stored_teacher=edited_teacher_text,
+        )
+        self._imported_goal(
+            self.source,
+            2,
+            teacher_text="Clean sibling",
+            coach_text="Clean coach sibling",
+        )
+
+        self._run()
+
+        edited = self.source.goals.get(order=1)
+        self.assertEqual(edited.teacher_review_comment, edited_teacher_text)
+        self.assertEqual(edited.coach_review_comment, "Original coach text")
+
+        sibling = self.source.goals.get(order=2)
+        self.assertEqual(sibling.teacher_review_comment, "Clean sibling")
+        self.assertEqual(sibling.coach_review_comment, "Clean coach sibling")
+
+        # Nothing was fabricated for the flagged appraisal.
+        self.assertFalse(
+            Appraisal.objects.filter(academic_year__start_year=2024).exists()
+        )
+        self.assertFalse(AcademicYear.objects.filter(start_year=2024).exists())
+
+    # Catches live in-app work being treated as import residue: a goal with no
+    # ImportRow was typed by a human, so it must never be moved or blanked.
+    def test_goal_with_no_import_row_is_left_untouched(self):
+        self._unimported_goal(
+            self.source,
+            1,
+            teacher_text="Typed straight into the app.",
+            coach_text="Also typed in the app.",
+        )
+
+        self._run()
+
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Typed straight into the app.")
+        self.assertEqual(goal.coach_review_comment, "Also typed in the app.")
+        self.assertFalse(
+            Appraisal.objects.filter(academic_year__start_year=2024).exists()
+        )
+
+    # --- idempotency and containment --------------------------------------
+
+    # Catches a second run duplicating, re-blanking or overwriting the target:
+    # after the first run the source is empty, and an empty source must be a
+    # complete no-op rather than a move of "".
+    def test_second_run_is_a_no_op_and_does_not_disturb_the_moved_review(self):
+        self._imported_goal(
+            self.source, 1, teacher_text="Moved once.", coach_text="Coach moved once."
+        )
+
+        self._run()
+        goal_count_after_first = Goal.objects.count()
+        appraisal_count_after_first = Appraisal.objects.count()
+
+        self._run()
+
+        self.assertEqual(Goal.objects.count(), goal_count_after_first)
+        self.assertEqual(Appraisal.objects.count(), appraisal_count_after_first)
+
+        target_goal = Goal.objects.get(
+            appraisal__teacher=self.teacher,
+            appraisal__academic_year__start_year=2024,
+            order=1,
+        )
+        self.assertEqual(target_goal.teacher_review_comment, "Moved once.")
+        self.assertEqual(target_goal.coach_review_comment, "Coach moved once.")
+
+        source_goal = self.source.goals.get(order=1)
+        self.assertEqual(source_goal.teacher_review_comment, "")
+
+    # Catches the worst possible outcome: source text deleted after the write to
+    # an already-occupied target was declined, losing the review entirely.
+    def test_occupied_target_goal_does_not_blank_the_source(self):
+        target_year = make_year(2024, is_current=False)
+        target = make_appraisal(
+            self.teacher, target_year, coach_email="oldcoach@oxlip.test"
+        )
+        occupied = target.goals.get(order=1)
+        occupied.teacher_review_comment = "Genuine 2024/25 review, written in the app."
+        occupied.coach_review_comment = "Genuine 2024/25 coach review."
+        occupied.save()
+
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Misfiled teacher text",
+            coach_text="Misfiled coach text",
+        )
+        # A second, unblocked goal so the appraisal is still movable and the
+        # apply path really runs.
+        self._imported_goal(
+            self.source,
+            2,
+            teacher_text="Movable teacher text",
+            coach_text="Movable coach text",
+        )
+
+        self._run()
+
+        source_blocked = self.source.goals.get(order=1)
+        self.assertEqual(source_blocked.teacher_review_comment, "Misfiled teacher text")
+        self.assertEqual(source_blocked.coach_review_comment, "Misfiled coach text")
+
+        occupied.refresh_from_db()
+        self.assertEqual(
+            occupied.teacher_review_comment,
+            "Genuine 2024/25 review, written in the app.",
+        )
+
+        # The unblocked sibling still moved.
+        self.assertEqual(self.source.goals.get(order=2).teacher_review_comment, "")
+        self.assertEqual(
+            target.goals.get(order=2).teacher_review_comment, "Movable teacher text"
+        )
+
+    # Catches --dry-run writing: the whole point of previewing a one-off
+    # correction on production data is that it cannot touch anything.
+    def test_dry_run_writes_nothing_at_all(self):
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Preview only.",
+            coach_text="Preview coach only.",
+        )
+
+        before = (
+            AcademicYear.objects.count(),
+            Appraisal.objects.count(),
+            Goal.objects.count(),
+        )
+
+        self._run(dry_run=True)
+
+        after = (
+            AcademicYear.objects.count(),
+            Appraisal.objects.count(),
+            Goal.objects.count(),
+        )
+        self.assertEqual(before, after)
+        self.assertFalse(AcademicYear.objects.filter(start_year=2024).exists())
+
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Preview only.")
+        self.assertEqual(goal.coach_review_comment, "Preview coach only.")
+
+    # Catches the containment guarantee failing: the two fields this command
+    # clears are the same two the CURRENT year's "Last Year" tab writes into, so
+    # a scoping slip would delete coaches' in-progress work.
+    #
+    # The current-year goals here are deliberately given matching ImportRows, so
+    # the edit guard would happily let them through. The ONLY thing standing
+    # between them and a blanking is the --from-year filter - which is exactly
+    # what this test is for. They also use goal orders the source does not, so a
+    # scope slip cannot be masked by the target-occupied guard instead.
+    def test_goals_outside_the_from_year_are_never_written(self):
+        current = make_appraisal(
+            self.teacher, self.current_year, coach_email=self.coach_email
+        )
+        live_teacher_text = "In-progress 2026/27 review of the 2025/26 goals."
+        live_coach_text = "In-progress 2026/27 coach comment."
+        for order in (2, 3):
+            self._imported_goal(
+                current,
+                order,
+                teacher_text="%s (%s)" % (live_teacher_text, order),
+                coach_text="%s (%s)" % (live_coach_text, order),
+            )
+
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Misfiled text",
+            coach_text="Misfiled coach text",
+        )
+
+        self._run()
+
+        for order in (2, 3):
+            goal = current.goals.get(order=order)
+            self.assertEqual(
+                goal.teacher_review_comment, "%s (%s)" % (live_teacher_text, order)
+            )
+            self.assertEqual(
+                goal.coach_review_comment, "%s (%s)" % (live_coach_text, order)
+            )
+
+        # And nothing was fabricated against the current year either.
+        self.assertEqual(
+            Appraisal.objects.filter(academic_year=self.current_year).count(), 1
+        )
+
+    # --- argument guards --------------------------------------------------
+
+    # Catches a wider-than-one-year move "succeeding": previous() only looks one
+    # year back, so the reviews would land somewhere no view can reach them.
+    def test_non_adjacent_years_are_refused(self):
+        self._imported_goal(
+            self.source, 1, teacher_text="Text", coach_text="Coach text"
+        )
+
+        with self.assertRaises(CommandError):
+            self._run(from_year=2025, to_year=2023)
+        with self.assertRaises(CommandError):
+            self._run(from_year=2025, to_year=2025)
+
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Text")
+
+    # Catches the before-state either not being recorded at all, or being
+    # written into the repo - the file holds named staff performance commentary
+    # and a commit of this repo is a live deploy.
+    def test_real_run_requires_a_backup_file_outside_the_repository(self):
+        self._imported_goal(
+            self.source, 1, teacher_text="Text", coach_text="Coach text"
+        )
+
+        with self.assertRaises(CommandError):
+            self._run(backup_file="")
+
+        inside_repo = str(Path(settings.BASE_DIR) / "goal-review-move.json")
+        with self.assertRaises(CommandError):
+            self._run(backup_file=inside_repo)
+        self.assertFalse(Path(inside_repo).exists())
+
+        # Nothing moved on either refusal.
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Text")
+
+        # A path outside the repo is accepted and the record is written.
+        outside = self._temp_backup()
+        self._run(backup_file=outside)
+        self.assertTrue(Path(outside).exists())
+
+    # Catches --teacher-email being ignored, which would turn a cautious
+    # one-person trial run into a full trust-wide write.
+    def test_teacher_email_limits_the_run_to_that_teacher(self):
+        other = make_staff(
+            "other@oxlip.test",
+            performance_manager_email=self.coach_email,
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        other_source = make_appraisal(
+            other, self.source_year, coach_email=self.coach_email
+        )
+
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Trialled teacher text",
+            coach_text="Trialled coach text",
+        )
+        self._imported_goal(
+            other_source,
+            1,
+            teacher_text="Untouched teacher text",
+            coach_text="Untouched coach text",
+        )
+
+        self._run(teacher_email=self.teacher.email)
+
+        self.assertEqual(self.source.goals.get(order=1).teacher_review_comment, "")
+        self.assertEqual(
+            other_source.goals.get(order=1).teacher_review_comment,
+            "Untouched teacher text",
+        )
+        self.assertEqual(
+            other_source.goals.get(order=1).coach_review_comment,
+            "Untouched coach text",
+        )
+        self.assertFalse(
+            Appraisal.objects.filter(
+                teacher=other, academic_year__start_year=2024
+            ).exists()
+        )
+
+
+class MoveGoalReviewsAdminActionTests(TestCase):
+    """The browser front end for the same one-off correction.
+
+    ``AcademicYearAdmin.move_misplaced_goal_reviews`` is the second front end
+    onto ``goal_review_fix`` (the management command above is the first). The
+    core decision rules are tested there; what needs its own coverage here is
+    everything the admin adds — the staff/superuser gate, the exactly-one-year
+    guard, and above all the fact that reaching the preview page writes
+    nothing. That preview is the operator's only chance to change their mind
+    about an irreversible move of named performance commentary.
+
+    The ImportBatch/ImportRow fixtures are borrowed wholesale from
+    ``MovePriorYearGoalReviewsTests`` rather than re-invented, so both front
+    ends are exercised against identical data.
+    """
+
+    _confirmed_batch = MovePriorYearGoalReviewsTests._confirmed_batch
+    _imported_goal = MovePriorYearGoalReviewsTests._imported_goal
+    _unimported_goal = MovePriorYearGoalReviewsTests._unimported_goal
+
+    def setUp(self):
+        MovePriorYearGoalReviewsTests.setUp(self)
+        self.changelist_url = reverse("admin:appraisals_academicyear_changelist")
+
+    # --- helpers ----------------------------------------------------------
+
+    def _counts(self):
+        return (
+            AcademicYear.objects.count(),
+            Appraisal.objects.count(),
+            Goal.objects.count(),
+        )
+
+    def _post_action(self, *years, confirm=False, approved=None, follow=False):
+        """POST the action exactly as the changelist / confirmation page does.
+
+        Without ``confirm`` this is the changelist dropdown submission (which
+        carries ``index``); with it, it is the hidden-field form on the
+        confirmation page (which does not, but does carry one
+        ``approved_goal`` per goal the operator was shown).
+        """
+        data = {
+            "action": "move_misplaced_goal_reviews",
+            ACTION_CHECKBOX_NAME: [str(year.pk) for year in years],
+        }
+        if confirm:
+            data["confirm"] = "yes"
+            data["approved_goal"] = [str(goal.pk) for goal in (approved or [])]
+        else:
+            data["index"] = "0"
+        return self.client.post(self.changelist_url, data, follow=follow)
+
+    def _staff_user(self, email, codename):
+        """An admin-site user with exactly one permission on AcademicYear."""
+        user = make_user(email)
+        user.is_staff = True
+        user.save(update_fields=["is_staff"])
+        user.user_permissions.add(
+            Permission.objects.get(
+                codename=codename, content_type__app_label="appraisals"
+            )
+        )
+        return user
+
+    def _approve_everything(self, year):
+        """The goal pks the confirmation page would render for this year."""
+        return [
+            move.goal
+            for plan in build_plan(year, year.start_year - 1)
+            for move in plan.moves
+        ]
+
+    # --- the gate ---------------------------------------------------------
+
+    # Catches the admin gate being the only thing standing in front of an
+    # irreversible bulk rewrite of performance commentary: a logged-in but
+    # non-staff user must not reach the action at all, let alone run it.
+    def test_non_superuser_cannot_reach_the_admin_action(self):
+        ordinary = make_user("classroom@oxlip.test")
+        self._imported_goal(
+            self.source, 1, teacher_text="Misfiled text", coach_text="Misfiled coach"
+        )
+        before = self._counts()
+
+        self.client.force_login(ordinary)
+        response = self._post_action(
+            self.source_year, confirm=True, approved=self.source.goals.all()
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response.url)
+        self.assertEqual(self._counts(), before)
+        self.assertEqual(
+            self.source.goals.get(order=1).teacher_review_comment, "Misfiled text"
+        )
+
+    # --- the exactly-one-year guard ---------------------------------------
+
+    # Catches a multi-year selection running anyway: the action moves reviews
+    # back exactly one year, so a two-year selection has no coherent meaning
+    # and must refuse rather than silently pick one.
+    def test_selecting_more_than_one_year_refuses_and_writes_nothing(self):
+        self._imported_goal(
+            self.source, 1, teacher_text="Misfiled text", coach_text="Misfiled coach"
+        )
+        before = self._counts()
+
+        self.client.force_login(self.super_user)
+        response = self._post_action(
+            self.source_year,
+            self.current_year,
+            confirm=True,
+            approved=self.source.goals.all(),
+            follow=True,
+        )
+
+        # Nothing moved, and nothing was fabricated to move it into.
+        self.assertEqual(self._counts(), before)
+        self.assertFalse(AcademicYear.objects.filter(start_year=2024).exists())
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Misfiled text")
+        self.assertEqual(goal.coach_review_comment, "Misfiled coach")
+
+        # And the operator was told why, rather than left guessing.
+        self.assertEqual(response.status_code, 200)
+        notes = [str(message) for message in response.context["messages"]]
+        self.assertTrue(
+            any("Select exactly one academic year" in note for note in notes), notes
+        )
+
+    # --- the preview ------------------------------------------------------
+
+    # The most important test in this class. Catches the preview writing: an
+    # operator opening the confirmation page to read what WOULD happen must not
+    # thereby have done it. The admin equivalent of the command's --dry-run
+    # guarantee, and the only reason the two-step flow exists.
+    def test_preview_without_confirm_writes_absolutely_nothing(self):
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Preview only.",
+            coach_text="Preview coach only.",
+        )
+        before = self._counts()
+
+        self.client.force_login(self.super_user)
+        response = self._post_action(self.source_year)
+
+        # The confirmation page rendered, rather than redirecting back.
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Move misplaced goal reviews")
+
+        self.assertEqual(self._counts(), before)
+        self.assertFalse(AcademicYear.objects.filter(start_year=2024).exists())
+        self.assertFalse(
+            Appraisal.objects.filter(academic_year__start_year=2024).exists()
+        )
+
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Preview only.")
+        self.assertEqual(goal.coach_review_comment, "Preview coach only.")
+
+    # --- confirming -------------------------------------------------------
+
+    # Catches the confirmed move either not happening or happening without a
+    # record: the JSON download is the operator's only "before" copy of text
+    # this move blanks at source, so it must arrive as an attachment, parse,
+    # and actually contain the moved wording.
+    def test_confirming_moves_the_reviews_and_returns_the_json_record(self):
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="I met the standards.",
+            coach_text="Agreed, met.",
+        )
+
+        approved = self._approve_everything(self.source_year)
+        self.assertEqual(len(approved), 1)
+
+        self.client.force_login(self.super_user)
+        response = self._post_action(
+            self.source_year, confirm=True, approved=approved
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertIn("attachment;", response["Content-Disposition"])
+        self.assertIn(".json", response["Content-Disposition"])
+
+        record = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(record["moved_goals"], 1)
+        self.assertEqual(record["moved_appraisals"], 1)
+        moved = record["appraisals"][0]["goals"][0]
+        self.assertEqual(moved["teacher_review_comment"], "I met the standards.")
+        self.assertEqual(moved["coach_review_comment"], "Agreed, met.")
+
+        # And the database really changed, not merely the download.
+        target_goal = Goal.objects.get(
+            appraisal__teacher=self.teacher,
+            appraisal__academic_year__start_year=2024,
+            order=1,
+        )
+        self.assertEqual(target_goal.teacher_review_comment, "I met the standards.")
+        self.assertEqual(target_goal.coach_review_comment, "Agreed, met.")
+
+        source_goal = self.source.goals.get(order=1)
+        self.assertEqual(source_goal.teacher_review_comment, "")
+        self.assertEqual(source_goal.coach_review_comment, "")
+
+    # Catches the edit guard living in the command rather than in the shared
+    # logic: an appraisal edited since the import may be a coach's own work,
+    # and the admin path must skip the whole appraisal exactly as the command
+    # does — including its clean siblings.
+    def test_flagged_appraisal_is_skipped_by_the_admin_action_too(self):
+        edited_text = "The coach rewrote this in the app."
+        self._imported_goal(
+            self.source,
+            1,
+            teacher_text="Original imported text",
+            coach_text="Original coach text",
+            stored_teacher=edited_text,
+        )
+        self._imported_goal(
+            self.source, 2, teacher_text="Clean sibling", coach_text="Clean coach"
+        )
+
+        self.client.force_login(self.super_user)
+        response = self._post_action(
+            self.source_year, confirm=True, approved=self.source.goals.all()
+        )
+
+        record = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(record["moved_goals"], 0)
+        self.assertEqual(record["moved_appraisals"], 0)
+        self.assertEqual(record["appraisals"], [])
+
+        edited = self.source.goals.get(order=1)
+        self.assertEqual(edited.teacher_review_comment, edited_text)
+        self.assertEqual(edited.coach_review_comment, "Original coach text")
+        sibling = self.source.goals.get(order=2)
+        self.assertEqual(sibling.teacher_review_comment, "Clean sibling")
+        self.assertEqual(sibling.coach_review_comment, "Clean coach")
+
+        # Nothing was fabricated to hold them.
+        self.assertFalse(
+            Appraisal.objects.filter(academic_year__start_year=2024).exists()
+        )
+        self.assertEqual(Goal.objects.filter(appraisal=self.source).count(), 3)
+
+    # Catches the action being offered to a view-only staff user. Django's
+    # ``permissions=["change"]`` keeps it out of the dropdown, so the POST is
+    # not recognised as an action at all — the UI tidy-up half of the gate.
+    def test_view_only_staff_user_is_not_offered_the_action(self):
+        readonly = self._staff_user("officeadmin@oxlip.test", "view_academicyear")
+        self._imported_goal(
+            self.source, 1, teacher_text="Misfiled text", coach_text="Misfiled coach"
+        )
+        before = self._counts()
+
+        self.client.force_login(readonly)
+        response = self._post_action(
+            self.source_year,
+            confirm=True,
+            approved=self.source.goals.all(),
+            follow=True,
+        )
+
+        notes = [str(message) for message in response.context["messages"]]
+        self.assertIn("No action selected.", notes)
+        self.assertEqual(self._counts(), before)
+        self.assertEqual(
+            self.source.goals.get(order=1).teacher_review_comment, "Misfiled text"
+        )
+
+    # Catches the real gap: ``permissions=["change"]`` is only a dropdown
+    # filter, so a staff user who legitimately edits Academic years reaches the
+    # action — and change permission on AcademicYear is the wrong model to gate
+    # on, because the action rewrites Appraisal and Goal across the whole trust
+    # and hands back every affected staff member's commentary as a download.
+    # The explicit superuser check is the security boundary; this is its test.
+    def test_staff_user_with_change_permission_is_still_refused(self):
+        editor = self._staff_user("yearadmin@oxlip.test", "change_academicyear")
+        self._imported_goal(
+            self.source, 1, teacher_text="Misfiled text", coach_text="Misfiled coach"
+        )
+        before = self._counts()
+
+        self.client.force_login(editor)
+        response = self._post_action(
+            self.source_year, confirm=True, approved=self.source.goals.all()
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self._counts(), before)
+        goal = self.source.goals.get(order=1)
+        self.assertEqual(goal.teacher_review_comment, "Misfiled text")
+        self.assertEqual(goal.coach_review_comment, "Misfiled coach")
+        # No commentary leaked into the refusal either.
+        self.assertNotContains(response, "Misfiled", status_code=403)
+
+    # Catches the applied set being wider than the approved one. The plan is
+    # rebuilt on confirm, so a goal can ENTER it between preview and confirm
+    # (e.g. a goals import confirmed in the interim gives a previously
+    # unimported goal an ImportRow). The operator approved a named list; only
+    # that list may be written, and the rest must be reported rather than moved.
+    def test_goal_that_appeared_after_the_preview_is_reported_not_moved(self):
+        approved_goal = self._imported_goal(
+            self.source, 1, teacher_text="Seen at preview.", coach_text="Coach seen."
+        )
+        # Not in the approved list: it became movable after the page was drawn.
+        self._imported_goal(
+            self.source,
+            2,
+            teacher_text="Appeared afterwards.",
+            coach_text="Coach appeared afterwards.",
+        )
+
+        self.client.force_login(self.super_user)
+        response = self._post_action(
+            self.source_year, confirm=True, approved=[approved_goal]
+        )
+
+        record = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(record["moved_goals"], 1)
+        self.assertEqual(
+            record["not_applied_new_since_preview"],
+            [{"teacher_email": self.teacher.email, "goal_order": 2}],
+        )
+
+        self.assertEqual(self.source.goals.get(order=1).teacher_review_comment, "")
+        unapproved = self.source.goals.get(order=2)
+        self.assertEqual(unapproved.teacher_review_comment, "Appeared afterwards.")
+        self.assertEqual(
+            unapproved.coach_review_comment, "Coach appeared afterwards."
+        )
+        self.assertFalse(
+            Goal.objects.filter(
+                appraisal__academic_year__start_year=2024, order=2
+            ).exists()
+        )
+
+
+class ApplyPlanNoOpTests(TestCase):
+    """A run with nothing to move must not leave a stray academic year behind.
+
+    ``apply_plan`` used to create the target year before checking whether
+    anything was movable. The management command short-circuits earlier so never
+    reached it, but the admin action does — and a plan narrowed to nothing (every
+    appraisal failing the re-check, or restrict_to_approved filtering it empty)
+    is an ordinary way to get there. AcademicYear drives the current/previous
+    split and check_readiness, so a spurious empty year is not harmless.
+    """
+
+    def test_empty_plan_creates_no_academic_year(self):
+        from .goal_review_fix import apply_plan
+
+        self.assertFalse(AcademicYear.objects.filter(start_year=2024).exists())
+
+        record = apply_plan([], 2024)
+
+        self.assertFalse(
+            AcademicYear.objects.filter(start_year=2024).exists(),
+            "a no-op run fabricated an AcademicYear",
+        )
+        self.assertEqual(record["moved_goals"], 0)
+        self.assertEqual(record["moved_appraisals"], 0)
+        self.assertFalse(record["target_year_created"])

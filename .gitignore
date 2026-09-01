@@ -37,3 +37,7 @@ db.sqlite3
 # OS
 .DS_Store
 Thumbs.db
+
+# One-off data-correction records — hold staff performance commentary.
+# The command refuses to write inside the repo; this catches stray copies.
+goal-review-move*.json

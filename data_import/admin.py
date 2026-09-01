@@ -20,8 +20,12 @@ class ImportBatchAdmin(admin.ModelAdmin):
         "create_count",
         "update_count",
         "skip_count",
+        # Surfaced on the listing because this is the one flag that makes an
+        # import destructive — an auditor asking "which batch erased comments?"
+        # should be able to see it without opening each batch.
+        "clear_blank_fields",
     )
-    list_filter = ("import_type", "status")
+    list_filter = ("import_type", "status", "clear_blank_fields")
     search_fields = ("original_filename", "uploaded_by__username", "uploaded_by__email")
     inlines = (ImportRowInline,)
 

@@ -59,6 +59,14 @@ class ImportBatch(models.Model):
     confirmed_at = models.DateTimeField(null=True, blank=True)
     original_filename = models.CharField(max_length=255, blank=True, default="")
 
+    # Normally a blank CSV cell leaves the existing value alone (see
+    # services._set_if_present and docs/import_templates.md). Set on a goals
+    # upload, it makes a blank cell CLEAR the field instead — the only way to
+    # remove text that should not be there via an import. Off by default and
+    # deliberately per-batch, so the destructive reading is always a recorded,
+    # per-upload decision rather than a global change to import semantics.
+    clear_blank_fields = models.BooleanField(default=False)
+
     # Aggregate outcome counts, computed from this batch's rows right after
     # parsing so the hub/preview pages render summary numbers without
     # re-scanning every row.
