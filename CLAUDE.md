@@ -38,6 +38,8 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py start_next_year     # advance to the next academic year: create the year after the current one (if needed) and mark it current (idempotent; backs the admin "Start next academic year" button)
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings           # delete legacy line meetings with no note content
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings --dry-run # preview what would be deleted
+.venv/Scripts/python.exe manage.py move_prior_year_goal_reviews --dry-run  # preview the one-off goal-review correction (see "Goal review correction")
+.venv/Scripts/python.exe manage.py move_prior_year_goal_reviews --backup-file <path outside the repo>  # run it; --backup-file is REQUIRED and refused inside BASE_DIR
 
 # Tests (Django test runner; every app has a suite — core covers the SSO auth gate + readiness command)
 .venv/Scripts/python.exe manage.py test                # all tests
@@ -227,6 +229,64 @@ Before anyone can start an appraisal: an `AcademicYear` must be marked `is_curre
 a matching Django `User` (same email, for SSO) and a `StaffMember` with `staff_type` set (`LEADER`
 for the Headteacher-Standards variant).
 
+### Goal review correction (one-off remediation)
+
+`appraisals/goal_review_fix.py` holds the core logic for a **one-off data correction**, shared by two
+front ends so the decision rules exist once: the `move_prior_year_goal_reviews` management command
+and the **"Move misplaced goal reviews"** action on the `AcademicYear` admin changelist. Keep both
+thin — all rules belong in the module.
+
+**The fault it corrects.** The trust's first system was a PowerApps/SharePoint list with one row per
+teacher per year, carrying **two** parallel blocks of review columns: `Review of Goal N` (the
+performance manager's review of the *previous* year's goals, written each September) and
+`Goal N Review` (the interim review of *that* year's goals, written from December onwards). The
+original bulk import mapped the **first** block onto the goals of the year the row belonged to — so a
+September 2025 review of the 2024/25 goals was stored on the **2025/26** `Goal` rows. Nothing is
+structurally malformed, which is why this is **invisible in the Django admin**: a `Goal` with review
+text looks entirely normal, and is wrong only in meaning. Don't go looking for a template bug.
+
+**Shape: plan, then apply** — the same split `data_import` uses. Every decision is made once in
+`build_plan()`; both the preview and the write consume that same plan, so a dry run cannot describe
+something different from what runs. `restrict_to_approved()` narrows a rebuilt plan to the goals the
+operator actually saw on the admin preview page, so a plan that changed between preview and confirm
+cannot quietly widen.
+
+**Safety rules (all load-bearing):**
+- **Live coach work is never overwritten.** `edit_reason()` compares each goal's stored text against
+  the `ImportRow.raw_json` that wrote it; a mismatch (`TEXT_DIFFERS`) or no import row at all
+  (`NO_IMPORT_ROW`) means a human has been in there since, so the whole appraisal is flagged and left
+  untouched. Re-checked inside the transaction under a row lock where the DB supports one. Note the
+  limit of the proof: it shows the text still equals what the last recorded import wrote, **not** that
+  no human ever edited it.
+- The two fields being cleared are the same two the *following* year's "Last Year" tab writes into —
+  which is why that guard is load-bearing rather than belt-and-braces.
+- `check_years()` enforces adjacency, because `Appraisal.previous()` looks exactly one year back.
+- Idempotent: once moved the source fields are blank, so a second run is a no-op — and `apply_plan()`
+  returns early **before** `get_or_create` on the target `AcademicYear`, so a no-op run cannot
+  fabricate an empty year.
+- Appraisals created for the target year get `coach_email=""` (deliberately **not** copied — it would
+  misattribute) and `status=SIGNED_OFF`. Goals with no recorded title get `PLACEHOLDER_TITLE`.
+
+**Both admin entry points are superuser-gated explicitly.** The action carries
+`permissions=["change"]` *and* an `is_superuser` check, because Django appends actions without
+`allowed_permissions` unconditionally and `admin_view` only checks `is_active and is_staff` — so
+gating on the `AcademicYear` model alone would have let any staff user with *view* permission run it
+and download every staff member's review text. `start_next_year_view` carries the same check for the
+same reason.
+
+The record of a run is returned as a **JSON download** (counts and goal PKs, never comment text) and
+is never written to the server filesystem; the command's `--backup-file` is required and refused
+inside `BASE_DIR`. `docs/goal_review_correction_dpo_note.md` is the GDPR note for the exercise.
+
+`scripts/sharepoint_to_goals_csv.py` is the companion **standalone** helper (not imported by the app):
+it converts the legacy SharePoint export into a `goals.csv` carrying the *second* block — the interim
+reviews that were never imported — for upload at `/import/`. It emits **only** the review columns, so
+the import cannot touch titles/steps/criteria, and refuses to write inside the repo.
+
+> **Order matters:** run the move **before** importing the interim reviews. Once the import runs,
+> `raw_json` holds the new values and the guard above would treat the *correct* interim reviews as
+> movable.
+
 ### Known follow-ups
 - `appraisals/tests.py` covers: the `get_appraisal_or_403` role matrix (incl. a
   dedicated test for the coach-email *snapshot* vs. line-management's live lookup), self-review save
@@ -242,7 +302,10 @@ for the Headteacher-Standards variant).
   IDOR, and the no-previous-appraisal 403) and the "Not in job role" tick box (that unticking clears
   the flag — an unticked box submits no key at all — and that the widget really is a checkbox).
   `core/tests.py` covers the SSO auth gate and the `check_readiness` command — no app is now without a
-  test suite.
+  test suite. The goal-review correction has its own three classes:
+  `MovePriorYearGoalReviewsTests` (the command + `build_plan`/`edit_reason` rules),
+  `MoveGoalReviewsAdminActionTests` (the superuser gate, the approved-set pinning, the JSON record),
+  and `ApplyPlanNoOpTests` (a no-op run must not fabricate an `AcademicYear` — a real bug this caught).
 - Senior-leader open items (deferred, not blocking): there is no overall/average score roll-up across
   the standards yet (`not_applicable` is modelled so an N/A-excluding average can be added later); and
   a leader still sees the appraisal's fixed **Goals** tab — hiding it for leaders is a possible
@@ -397,6 +460,29 @@ before applying it**, not just at upload time, since real time passes between pr
 row that resolved fine at upload but fails at confirm (e.g. its `AcademicYear` was deleted in the
 interim) is recorded as a fresh `SKIP` with an error message rather than raising.
 
+### The one destructive option: `clear_blank_fields`
+
+The standing rule everywhere else is **"a blank CSV cell never overwrites"** (`_set_if_present`).
+`ImportBatch.clear_blank_fields` is the single opt-in exception, offered on the **goals upload only**
+and applied to **only** the two review-comment fields — never `title` / `steps_to_success` /
+`success_criteria`. It exists so a bad import's comments can be *erased*, not just overwritten.
+
+Three things hold it safe, and each is separately tested:
+- The form field is **popped, not hidden**, for every other import type (`CsvUploadForm.__init__`), so
+  a hand-crafted POST cannot switch on destructive behaviour where the form never offered it.
+- The flag is read from the **stored batch**, not the request, at apply time.
+- `clearing_preview()` names on the preview page exactly which goals will genuinely lose text, so the
+  warning states a scale rather than a principle.
+
+`upload.html` must render the checkbox behind the view's `allow_clear_blanks` context flag — an
+explicit flag, not a truthiness test on the bound field, since the field is absent from the form
+entirely for other types. This regressed once: the template rendered only `{{ form.csv_file }}`, so
+the option was unreachable and every goals import silently ran with blanks-leave-alone. There is now a
+test asserting the checkbox reaches the **rendered page**, not just `form.fields`.
+
+**Ragged-row caveat:** a short CSV row is padded to empty by the reader, so a missing trailing column
+counts as present-and-empty and *will* clear. See `docs/import_templates.md`.
+
 ### Known follow-ups
 - `data_import/tests.py` covers the superuser-only access gate, the create/update/skip-and-report
   behaviour per import type, the self-review seed-once-per-group + evidence-on-bullet-order-1 rules,
@@ -409,6 +495,9 @@ interim) is recorded as a fresh `SKIP` with an error message rather than raising
   `SECRET_KEY` or `DATABASE_URL` is missing — a misconfigured deploy crashes loudly rather than
   running insecurely. Local dev uses SQLite; production requires Postgres.
 - Azure host/CSRF handling derives from the `WEBSITE_HOSTNAME` env var that Azure injects.
+- **No CSV is tracked** except the blank column templates under `docs/import_templates/`
+  (`.gitignore`: `*.csv` with a negation). Exports and generated import files hold named staff
+  performance commentary, and a commit here **is** a production deploy.
 - `requirements.txt` gates `gunicorn` and `psycopg[binary]` to non-Windows so local Windows installs
   stay clean while Azure Linux gets the production server + Postgres driver.
 - Full Azure deployment procedure (App Settings, startup command, Postgres vs SQLite rationale,
