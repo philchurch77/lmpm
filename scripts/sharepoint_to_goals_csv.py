@@ -134,18 +134,47 @@ def rows_from_export(export_path: Path, academic_year: int, block: str):
                 "Export is missing expected column(s): " + ", ".join(sorted(set(missing)))
             )
 
+        # A teacher may appear on more than one export row (8 did in the
+        # trust's export). Every emitted row is stamped with the SAME
+        # academic_year, so duplicates collide on the importer's
+        # (teacher, year, goal_type) uniqueness and the LAST one silently
+        # wins -- which, when the duplicate is the emptier of the two, wipes
+        # good review text with blanks. Merge them here instead: keep the
+        # non-empty value, and report any real disagreement rather than
+        # picking one behind the operator's back.
+        merged: dict[tuple[str, str], dict] = {}
+        conflicts: list[str] = []
         for source in reader:
             email = (source.get(EMAIL_COLUMN) or "").strip().lower()
             if not email:
                 continue
             for number, (coach_col, teacher_col) in columns.items():
-                yield {
+                row = {
                     "teacher_email": email,
                     "academic_year": academic_year,
                     "goal_type": GOAL_TYPES[number],
                     "teacher_review_comment": html_to_text(source.get(teacher_col, "")),
                     "coach_review_comment": html_to_text(source.get(coach_col, "")),
                 }
+                key = (email, row["goal_type"])
+                held = merged.get(key)
+                if held is None:
+                    merged[key] = row
+                    continue
+                for field_name in ("teacher_review_comment", "coach_review_comment"):
+                    old_v, new_v = held[field_name], row[field_name]
+                    if not new_v:
+                        continue
+                    if not old_v:
+                        held[field_name] = new_v
+                    elif old_v != new_v:
+                        held[field_name] = max(old_v, new_v, key=len)
+                        conflicts.append(
+                            f"{email} {row['goal_type']} {field_name}: two "
+                            f"different texts ({len(old_v)} vs {len(new_v)} "
+                            f"chars) -- kept the longer"
+                        )
+        return list(merged.values()), conflicts
 
 
 def main(argv=None) -> int:
@@ -180,7 +209,7 @@ def main(argv=None) -> int:
             "of this repo deploys to production. Choose a path outside it."
         )
 
-    rows = list(rows_from_export(args.export, args.academic_year, args.block))
+    rows, conflicts = rows_from_export(args.export, args.academic_year, args.block)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS)
@@ -193,6 +222,11 @@ def main(argv=None) -> int:
     teachers = len({r["teacher_email"] for r in rows})
     print(f"Wrote {len(rows)} row(s) for {teachers} teacher(s) to {out}")
     print(f"  {with_text} row(s) carry review text; {len(rows) - with_text} are blank.")
+    if conflicts:
+        print("")
+        print(str(len(conflicts)) + " duplicate-row conflict(s) resolved:")
+        for line in conflicts:
+            print(f"  {line}")
     print(
         "\nBlank rows are intentional — tick 'Blank review cells clear the stored\n"
         "comment' on the goals upload so they erase the misplaced text."

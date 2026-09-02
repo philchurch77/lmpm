@@ -16,6 +16,7 @@ email. ``PermissionDenied`` surfaces as HTTP 403 through the test client.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from datetime import date
 from io import StringIO
@@ -967,6 +968,244 @@ class LeaderReviewSaveTests(TestCase):
         response = self.client.post(self.save_url, self._payload(score="3"))
         self.assertEqual(response.status_code, 403)
         self.assertTrue(all(s.score is None for s in self.leader_review.standards.all()))
+
+
+class SelfReviewVariantFollowsOwnerTests(TestCase):
+    """Regression: the self-review VARIANT is a property of the appraisal's owner.
+
+    ``_build_section_forms`` used to branch on the StaffMember returned by
+    ``get_appraisal_or_403`` — i.e. the *viewer*. A senior-leader coach opening
+    a teaching coachee's appraisal therefore took the leader branch, which
+    called ``_ensure_leader_review`` and CREATED a blank LeaderReview plus 13
+    seeded LeaderStandard rows on the coachee's appraisal, and rendered those
+    blank rows instead of the teacher's real self-review. The teacher's own
+    page still looked fine, so nothing else caught it.
+
+    Every existing coach test on this tab was a POST, and ``self_review_save``
+    is teacher-gated, so it 403s before reaching the branch. These are GETs:
+    the actual user path.
+    """
+
+    def setUp(self):
+        self.leader_coach_email = "head@oxlip.test"
+        self.teaching_coach_email = "chair@oxlip.test"
+        self.support_coach_email = "office.manager@oxlip.test"
+        self.teacher_email = "teacher@oxlip.test"
+        self.leader_email = "deputy@oxlip.test"
+
+        self.leader_coach_user = make_user(self.leader_coach_email)
+        self.teaching_coach_user = make_user(self.teaching_coach_email)
+        self.support_coach_user = make_user(self.support_coach_email)
+        self.teacher_user = make_user(self.teacher_email)
+        self.leader_user = make_user(self.leader_email)
+
+        # The coaches. Their OWN staff_type is what the bug leaked through.
+        self.leader_coach = make_staff(
+            self.leader_coach_email, staff_type=StaffMember.StaffType.LEADER
+        )
+        self.teaching_coach = make_staff(
+            self.teaching_coach_email, staff_type=StaffMember.StaffType.TEACHING
+        )
+        self.support_coach = make_staff(
+            self.support_coach_email, staff_type=StaffMember.StaffType.SUPPORT
+        )
+
+        # A teaching coachee, performance-managed by the LEADER coach.
+        self.teacher = make_staff(
+            self.teacher_email,
+            performance_manager_email=self.leader_coach_email,
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        # A senior-leader coachee, performance-managed by a TEACHING coach.
+        self.leader = make_staff(
+            self.leader_email,
+            performance_manager_email=self.teaching_coach_email,
+            staff_type=StaffMember.StaffType.LEADER,
+        )
+
+        self.year = make_year()
+
+        self.teacher_appraisal = make_appraisal(
+            self.teacher, self.year, coach_email=self.leader_coach_email
+        )
+        self.teacher_self_review = make_self_review(self.teacher_appraisal)
+        # Real teacher-entered content, so we can prove the coach is looking at
+        # the teacher's record rather than a freshly seeded blank one.
+        self.evidence_text = "Evidence written by the teacher for Year 6 maths"
+        self.teacher_self_review.items.update(evidence=self.evidence_text)
+        SelfReviewBullet.objects.filter(
+            self_review_item__self_review=self.teacher_self_review
+        ).update(score=3)
+
+        self.leader_appraisal = make_appraisal(
+            self.leader, self.year, coach_email=self.teaching_coach_email
+        )
+        self.leader_review = make_leader_review(self.leader_appraisal)
+        self.examples_text = "Examples written by the deputy head"
+        self.leader_review.standards.update(examples=self.examples_text)
+
+        self.teacher_url = reverse(
+            "appraisals:detail_tab", args=[self.teacher_appraisal.pk, "self-review"]
+        )
+        self.leader_url = reverse(
+            "appraisals:detail_tab", args=[self.leader_appraisal.pk, "self-review"]
+        )
+
+    def _checked_score_inputs(self, response, field_name):
+        """The rendered score radio inputs for one bullet that carry `checked`."""
+        html = response.content.decode()
+        tags = re.findall(r'<input[^>]*name="%s"[^>]*>' % re.escape(field_name), html)
+        return [tag for tag in tags if "checked" in tag]
+
+    # REGRESSION. Catches the viewer's own LEADER staff_type selecting the
+    # self-review variant: a leader coach must see the teaching coachee's
+    # teaching self-review, not blank Headteacher's Standards.
+    def test_leader_coach_viewing_teaching_coachee_gets_the_teaching_variant(self):
+        self.client.force_login(self.leader_coach_user)
+        response = self.client.get(self.teacher_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["is_leader"])
+        self.assertEqual(response.context["self_review"], self.teacher_self_review)
+
+        rows = response.context["self_review_rows"]
+        expected_items = list(self.teacher_self_review.items.order_by("order"))
+        self.assertTrue(expected_items)
+        self.assertEqual(len(rows), len(expected_items))
+        rendered_bullets = [
+            bullet_form.instance
+            for row in rows
+            for bullet_form in row["bullet_forms"]
+        ]
+        self.assertTrue(rendered_bullets)
+        # Every bullet rendered must belong to THIS teacher's self-review.
+        self.assertTrue(
+            all(
+                bullet.self_review_item.self_review_id == self.teacher_self_review.pk
+                for bullet in rendered_bullets
+            )
+        )
+        self.assertEqual(
+            len(rendered_bullets),
+            SelfReviewBullet.objects.filter(
+                self_review_item__self_review=self.teacher_self_review
+            ).count(),
+        )
+
+    # REGRESSION. Catches the coachee's real answers being replaced on screen by
+    # a blank leader form — the half of the bug the coach actually saw.
+    def test_leader_coach_sees_the_teachers_saved_evidence_and_scores(self):
+        self.client.force_login(self.leader_coach_user)
+        response = self.client.get(self.teacher_url)
+        self.assertContains(response, self.evidence_text)
+        checked = self._checked_score_inputs(response, "bullets-0-score")
+        self.assertEqual(len(checked), 1)
+        self.assertIn('value="3"', checked[0])
+        # The leader form must not be on the page at all.
+        self.assertNotContains(response, "Headteacher")
+
+    # REGRESSION (data pollution). Catches a mere GET by a leader coach writing
+    # a blank LeaderReview + 13 LeaderStandard rows onto the coachee's appraisal.
+    def test_leader_coach_get_creates_no_leader_review_on_coachees_appraisal(self):
+        self.assertEqual(
+            LeaderReview.objects.filter(appraisal=self.teacher_appraisal).count(), 0
+        )
+        self.client.force_login(self.leader_coach_user)
+        response = self.client.get(self.teacher_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            LeaderReview.objects.filter(appraisal=self.teacher_appraisal).count(), 0
+        )
+        self.assertFalse(
+            LeaderStandard.objects.filter(
+                leader_review__appraisal=self.teacher_appraisal
+            ).exists()
+        )
+
+    # REGRESSION (mirror case). Catches a non-leader coach being shown a blank
+    # teaching self-review instead of the senior leader's real standards.
+    def test_teaching_coach_viewing_leader_coachee_gets_the_leader_variant(self):
+        self.client.force_login(self.teaching_coach_user)
+        response = self.client.get(self.leader_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["is_leader"])
+        self.assertEqual(response.context["leader_review"], self.leader_review)
+        self.assertContains(response, self.examples_text)
+
+    # REGRESSION (mirror data pollution). Catches a GET by a non-leader coach
+    # creating a SelfReview + seeded item/bullet tree on a leader's appraisal.
+    def test_teaching_coach_get_creates_no_self_review_on_leaders_appraisal(self):
+        self.assertEqual(
+            SelfReview.objects.filter(appraisal=self.leader_appraisal).count(), 0
+        )
+        self.client.force_login(self.teaching_coach_user)
+        response = self.client.get(self.leader_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            SelfReview.objects.filter(appraisal=self.leader_appraisal).count(), 0
+        )
+
+    # REGRESSION (kind pollution). An appraisal with no SelfReview yet is seeded
+    # on first GET; the KIND must come from the owner, not the viewer, or a
+    # SUPPORT coach's visit would give a teacher the support-staff descriptors.
+    def test_support_coach_get_seeds_the_teachers_kind_not_the_coachs(self):
+        appraisal = make_appraisal(
+            self.teacher,
+            make_year(2026, is_current=False),
+            coach_email=self.support_coach_email,
+        )
+        self.assertEqual(SelfReview.objects.filter(appraisal=appraisal).count(), 0)
+
+        self.client.force_login(self.support_coach_user)
+        url = reverse("appraisals:detail_tab", args=[appraisal.pk, "self-review"])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        self_review = SelfReview.objects.get(appraisal=appraisal)
+        self.assertEqual(self_review.kind, SelfReview.Kind.TEACHING)
+        self.assertEqual(self_review.items.count(), len(TEACHING_ITEMS))
+        self.assertEqual(LeaderReview.objects.filter(appraisal=appraisal).count(), 0)
+
+    # COVERAGE. The owner's own GET must be unaffected by the fix (teaching).
+    def test_teacher_still_sees_own_self_review_on_get(self):
+        self.client.force_login(self.teacher_user)
+        response = self.client.get(self.teacher_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["is_leader"])
+        self.assertEqual(response.context["self_review"], self.teacher_self_review)
+        self.assertContains(response, self.evidence_text)
+        self.assertEqual(
+            LeaderReview.objects.filter(appraisal=self.teacher_appraisal).count(), 0
+        )
+
+    # COVERAGE. The owner's own GET must be unaffected by the fix (leader).
+    def test_leader_still_sees_own_standards_on_get(self):
+        self.client.force_login(self.leader_user)
+        response = self.client.get(self.leader_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["is_leader"])
+        self.assertContains(response, self.examples_text)
+        self.assertEqual(
+            SelfReview.objects.filter(appraisal=self.leader_appraisal).count(), 0
+        )
+
+    # COVERAGE. A superuser has no StaffMember, so the old code fell back to
+    # ``appraisal.teacher`` and happened to be correct; pin that it stays so
+    # now that the fallback has gone.
+    def test_superuser_get_follows_each_owners_variant(self):
+        admin = make_user("admin@oxlip.test", is_superuser=True)
+        self.client.force_login(admin)
+
+        response = self.client.get(self.teacher_url)
+        self.assertFalse(response.context["is_leader"])
+        response = self.client.get(self.leader_url)
+        self.assertTrue(response.context["is_leader"])
+
+        self.assertEqual(
+            LeaderReview.objects.filter(appraisal=self.teacher_appraisal).count(), 0
+        )
+        self.assertEqual(
+            SelfReview.objects.filter(appraisal=self.leader_appraisal).count(), 0
+        )
 
 
 class StartAppraisalSelfClassifyTests(TestCase):

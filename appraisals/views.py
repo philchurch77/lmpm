@@ -61,13 +61,19 @@ def _is_leader(staff):
     return bool(staff) and staff.staff_type == StaffMember.StaffType.LEADER
 
 
-def _ensure_self_review(appraisal, staff):
-    """Get or create the appraisal's self-review and seed its items."""
+def _ensure_self_review(appraisal, owner):
+    """Get or create the appraisal's self-review and seed its items.
+
+    ``owner`` must be the appraisal's own staff member, never the viewer: ``kind``
+    is snapshotted here and ``seed_items()`` no-ops once items exist, so a kind
+    taken from the wrong person is permanent and silently seeds the wrong
+    descriptor set.
+    """
     self_review = getattr(appraisal, "self_review", None)
     if self_review is None:
         kind = (
             SelfReview.Kind.SUPPORT
-            if staff and staff.staff_type == StaffMember.StaffType.SUPPORT
+            if owner and owner.staff_type == StaffMember.StaffType.SUPPORT
             else SelfReview.Kind.TEACHING
         )
         self_review = SelfReview.objects.create(appraisal=appraisal, kind=kind)
@@ -164,9 +170,9 @@ def _build_leader_self_review(appraisal, can_teacher, bound):
     }
 
 
-def _build_standard_self_review(appraisal, staff, can_teacher, bound):
+def _build_standard_self_review(appraisal, owner, can_teacher, bound):
     """Build the teaching/support self-review tab forms (items + bullets)."""
-    self_review = _ensure_self_review(appraisal, staff)
+    self_review = _ensure_self_review(appraisal, owner)
 
     self_review_items = SelfReviewItemFormSet(
         bound("self-review"),
@@ -205,22 +211,27 @@ def _build_standard_self_review(appraisal, staff, can_teacher, bound):
     }
 
 
-def _build_section_forms(appraisal, staff, role, *, section=None, data=None):
+def _build_section_forms(appraisal, role, *, section=None, data=None):
     """Build forms/formsets for every tab; bind only ``section`` when posting."""
     can_teacher = can_edit_teacher_fields(appraisal, role)
     can_coach = can_edit_coach_fields(appraisal, role)
-    staff = staff or appraisal.teacher
+    # Which self-review variant to build is a property of the appraisal's OWNER,
+    # never of whoever is looking. Taking it from the viewer meant a senior-leader
+    # coach opening a teacher's appraisal got the leader form built (and seeded)
+    # against that teacher's record, so the teacher's real self-review never
+    # rendered. The viewer's role is carried by ``role``; identity stays here.
+    owner = appraisal.teacher
 
     def bound(name):
         return data if section == name else None
 
     # The self-review tab renders the leader variant or the teaching/support
     # variant; the Goals and Summary tabs (below) are the same for both.
-    if _is_leader(staff):
+    if _is_leader(owner):
         section_forms = _build_leader_self_review(appraisal, can_teacher, bound)
     else:
         section_forms = _build_standard_self_review(
-            appraisal, staff, can_teacher, bound
+            appraisal, owner, can_teacher, bound
         )
 
     # Last year's goals are reviewed from this year's page, so the formset is
@@ -270,9 +281,9 @@ def _render_detail(request, appraisal, role, forms_ctx, active_tab):
 
 @login_required
 def appraisal_detail(request, pk, tab="self-review"):
-    appraisal, staff, role = get_appraisal_or_403(request, pk)
+    appraisal, _staff, role = get_appraisal_or_403(request, pk)
     active_tab = tab if tab in TABS else "self-review"
-    forms_ctx = _build_section_forms(appraisal, staff, role)
+    forms_ctx = _build_section_forms(appraisal, role)
     return _render_detail(request, appraisal, role, forms_ctx, active_tab)
 
 
@@ -288,12 +299,12 @@ def _stamp_signoff(appraisal):
 
 def _save_section(request, pk, section, can_check, form_keys, success_msg):
     """Shared POST handler: re-auth, gate, validate the section, save or re-render."""
-    appraisal, staff, role = get_appraisal_or_403(request, pk)
+    appraisal, _staff, role = get_appraisal_or_403(request, pk)
     if not can_check(appraisal, role):
         raise PermissionDenied("You may not edit this section.")
 
     forms_ctx = _build_section_forms(
-        appraisal, staff, role, section=section, data=request.POST
+        appraisal, role, section=section, data=request.POST
     )
     keys = form_keys(forms_ctx) if callable(form_keys) else form_keys
     targets = [forms_ctx[key] for key in keys]

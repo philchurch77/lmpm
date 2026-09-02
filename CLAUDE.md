@@ -40,6 +40,8 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings --dry-run # preview what would be deleted
 .venv/Scripts/python.exe manage.py move_prior_year_goal_reviews --dry-run  # preview the one-off goal-review correction (see "Goal review correction")
 .venv/Scripts/python.exe manage.py move_prior_year_goal_reviews --backup-file <path outside the repo>  # run it; --backup-file is REQUIRED and refused inside BASE_DIR
+.venv/Scripts/python.exe manage.py purge_misseeded_self_reviews          # report self-reviews seeded against the wrong staff type (see "Owner vs viewer")
+.venv/Scripts/python.exe manage.py purge_misseeded_self_reviews --delete  # remove the provably-blank ones; reviews with content are always kept
 
 # Tests (Django test runner; every app has a suite — core covers the SSO auth gate + readiness command)
 .venv/Scripts/python.exe manage.py test                # all tests
@@ -180,6 +182,23 @@ signs off.
   (teacher / coach / super / none) and exposes `get_appraisal_or_403` — **every** detail/save view
   routes through it to prevent IDOR. The `User`→`StaffMember` lookup itself comes from the shared
   `core.identity.current_staff_member`.
+- **Owner vs viewer — which record's data is shown is never a function of who is
+  looking.** `_build_section_forms` deliberately takes only `(appraisal, role)`: the
+  viewer's *authority* arrives as `role`, and the record's *identity* comes from
+  `appraisal.teacher`. It used to receive the viewer's `StaffMember` and branch
+  `_is_leader()` on it, so a senior-leader coach opening a teacher's appraisal built the
+  leader variant against that teacher's record — the coach saw a blank Headteacher-
+  Standards form and the teacher's real self-review never rendered. The same mistake made
+  `_ensure_self_review` snapshot `kind` from the viewer, which is the dangerous half:
+  `kind` is stored and `seed_items()` no-ops once items exist, so a support-staff coach
+  who opened a teaching coachee first seeded the *support* descriptor tree onto that
+  teacher permanently and invisibly. Hence the parameters on that path are named `owner`,
+  not `staff` (`staff` means the viewer everywhere else in this codebase — that naming is
+  what produced the bug). `manage.py purge_misseeded_self_reviews` repairs the residue.
+  `start_appraisal` / `my_appraisal` legitimately use the viewer, because there the viewer
+  *is* the owner by construction.
+  **Note the seeding still happens on GET**, so a coach's or superuser's page view creates
+  the (now correct) review rows on someone else's record — a known wart, not yet fixed.
 - **Field-level gating is the security boundary, not template hiding**: forms
   (`appraisals/forms.py`) set `field.disabled=True` for fields the current role may not edit (Django
   then ignores any submitted value), and disable everything when `is_locked`. Teacher-owned vs
