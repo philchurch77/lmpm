@@ -1,0 +1,28 @@
+{% extends "core/base.html" %}
+
+{# Django's built-in 403 is a bare unstyled page with no navigation, which left
+   an administrator who hit a permission check with no way back. This keeps the
+   app shell (and so the sidebar) and shows the PermissionDenied message when
+   the raising code supplied one. #}
+
+{% block title %}Not allowed · Line &amp; Performance Management{% endblock %}
+
+{% block content %}
+  <h1 class="page-title">You do not have access to that</h1>
+
+  <div class="reflection-card">
+    <p>
+      {% if exception %}
+        {{ exception }}
+      {% else %}
+        This action is restricted, and your account does not have permission for it.
+      {% endif %}
+    </p>
+    <p>
+      If you think you should be able to do this, ask a trust administrator.
+    </p>
+    <p>
+      <a href="{% url 'home' %}">Back to the home page</a>
+    </p>
+  </div>
+{% endblock %}

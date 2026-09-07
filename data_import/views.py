@@ -13,6 +13,8 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from django.utils.html import format_html
 
 from .forms import CsvUploadForm
 from .models import ImportBatch, ImportRow, ImportType
@@ -112,6 +114,23 @@ def import_preview(request, batch_id):
         if action == "confirm":
             confirm_batch(batch)
             messages.success(request, "Import confirmed.")
+            if batch.import_type == ImportType.STAFF:
+                # The importer deliberately does not create logins (a CSV must
+                # never be able to mint hundreds of live SSO accounts), so
+                # without this the admin is told "Import confirmed" and
+                # reasonably assumes the job is done — while nobody imported can
+                # actually sign in. Say what is left to do, and where.
+                messages.warning(
+                    request,
+                    format_html(
+                        "The imported staff cannot sign in yet. Go to "
+                        '<a href="{}?login_state=any_problem">Staff members</a>, '
+                        "select them, and run "
+                        "&ldquo;Give selected staff a login&rdquo;. Anyone "
+                        "without a school set needs one first.",
+                        reverse("admin:core_staffmember_changelist"),
+                    ),
+                )
         elif action == "discard":
             batch.status = ImportBatch.Status.DISCARDED
             batch.save(update_fields=["status"])

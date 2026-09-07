@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
 
@@ -80,15 +82,37 @@ class Command(BaseCommand):
             )
 
         # 3. Staff with no login — a User must exist (by email) for SSO to work.
-        no_login = sorted(staff_emails - active_user_emails)
-        if no_login:
+        #    Split deliberately: a staff member whose only matching User is
+        #    DEACTIVATED has had their access revoked on purpose (that is how a
+        #    leaver is offboarded). Reporting them as a blocker with "run
+        #    provision_users" invited an administrator to hand a leaver their
+        #    access back, and left a readiness check that could never go green.
+        inactive_user_emails = {
+            (u.email or "").strip().lower()
+            for u in User.objects.filter(is_active=False)
+            if u.email
+        }
+        never_had_login = sorted(
+            staff_emails - active_user_emails - inactive_user_emails
+        )
+        revoked = sorted((staff_emails - active_user_emails) & inactive_user_emails)
+        if never_had_login:
             blockers += 1
             self._section(
-                f"BLOCKER: {len(no_login)} staff have no login account",
-                no_login,
+                f"BLOCKER: {len(never_had_login)} staff have no login account",
+                never_had_login,
                 limit,
-                note="No active Django User matches their email — run "
-                "`provision_users`.",
+                note="No Django User matches their email — save them in the "
+                "admin (with a school set) or run `provision_users`.",
+            )
+        if revoked:
+            self._section(
+                f"INFO: {len(revoked)} staff have a deactivated login",
+                revoked,
+                limit,
+                note="Treated as access deliberately revoked (a leaver), not a "
+                "problem to fix. Provisioning refuses to reactivate them. If "
+                "someone here has returned, reactivate their User.",
             )
 
         # 4. Staff who have a User but no SchoolProfile (fails the SSO gate).
@@ -111,9 +135,15 @@ class Command(BaseCommand):
                 no_profile,
                 limit,
                 note="They will be denied at login ('not configured with a "
-                "school') — run `provision_users` (needs a school on the "
-                "StaffMember).",
+                "school') — set a school on the StaffMember and save it in the "
+                "admin, or run `provision_users`.",
             )
+
+        # Everyone who can actually sign in today: an active, non-superuser login
+        # that carries a SchoolProfile, plus the superusers who bypass that gate.
+        provisioned_emails = (
+            staff_emails & active_user_emails
+        ) - set(no_profile) - set(never_had_login)
 
         # 5. Login but no StaffMember — they pass the SSO gate then hit "couldn't
         #    find a staff record" on every feature page. Exclude superusers (who
@@ -131,16 +161,76 @@ class Command(BaseCommand):
                 "find a staff record'. Create a StaffMember or deactivate the User.",
             )
 
-        # 6. Staff with no school FK — provision_users skips these.
-        no_school = [s.email for s in staff if s.school is None]
+        # 6. Staff with no school FK — provisioning skips these. Only a problem
+        #    for people who cannot already sign in: clearing the school from
+        #    someone already provisioned leaves their access intact, so warning
+        #    that "they get no login" would be simply false for them.
+        no_school = [
+            s.email
+            for s in staff
+            if s.school is None
+            and (s.email or "").strip().lower() not in provisioned_emails
+        ]
         if no_school:
             warnings += 1
             self._section(
                 f"WARNING: {len(no_school)} staff have no school",
                 no_school,
                 limit,
-                note="`provision_users` skips them (a SchoolProfile needs a "
-                "school), so they get no login.",
+                note="Provisioning skips them (a SchoolProfile needs a school), "
+                "so they get no login until one is set. Setting the school and "
+                "saving in the admin finishes the job.",
+            )
+
+        # 6b. Two active logins sharing one email. auth.User.email is not
+        #     unique, and the SSO gate can only sign the person into one of
+        #     them — so if the other holds the SchoolProfile, access is a
+        #     coin flip. core.provisioning refuses to provision these rather
+        #     than guessing which account is the real one.
+        email_counts = Counter(
+            (u.email or "").strip().lower()
+            for u in User.objects.filter(is_active=True)
+            if (u.email or "").strip()
+        )
+        duplicate_logins = sorted(
+            f"{email} ({count} active accounts)"
+            for email, count in email_counts.items()
+            if count > 1
+        )
+        if duplicate_logins:
+            blockers += 1
+            self._section(
+                f"BLOCKER: {len(duplicate_logins)} email(s) have more than one login",
+                duplicate_logins,
+                limit,
+                note="Which account they sign into is undefined, and their "
+                "access cannot be set up until the duplicate is removed. "
+                "Deactivate or delete the redundant User.",
+            )
+
+        # 6c. Emails that are not normalised. Migration 0005 lower-cased the
+        #     existing data and both write paths keep it that way, so anything
+        #     here arrived by a route that bypasses them (a bulk .update(), a
+        #     raw SQL edit, a fixture). Reads are case-insensitive so nothing is
+        #     broken today — it is reported because the *next* query that
+        #     compares emails exactly would be wrong, silently.
+        unnormalised = sorted(
+            u.email
+            for u in User.objects.exclude(email="")
+            if u.email != u.email.strip().lower()
+        ) + sorted(
+            s.email
+            for s in staff
+            if s.email and s.email != s.email.strip().lower()
+        )
+        if unnormalised:
+            warnings += 1
+            self._section(
+                f"WARNING: {len(unnormalised)} email(s) are not lower case",
+                unnormalised,
+                limit,
+                note="Identity is matched on the email string. Re-saving the "
+                "record in the admin normalises it.",
             )
 
         # 7. Dangling manager links — manager emails that resolve to nobody.

@@ -33,7 +33,7 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py seed_schools        # populate the trust's schools (idempotent)
 .venv/Scripts/python.exe manage.py seed_branding       # populate the single branding row (idempotent)
 .venv/Scripts/python.exe manage.py seed_testdata       # appraisals: a local test cohort (teacher/coach/head logins, all @test.local)
-.venv/Scripts/python.exe manage.py provision_users     # give imported StaffMembers a login: create matching User + SchoolProfile (idempotent; --dry-run to preview)
+.venv/Scripts/python.exe manage.py provision_users     # give imported StaffMembers a login: create matching User + SchoolProfile (idempotent; --dry-run to preview). Saving a StaffMember in the admin does this too — see "Granting access"
 .venv/Scripts/python.exe manage.py check_readiness     # read-only audit of onboarding dead-ends (unclassified staff, no login, no active year, dangling manager links); non-zero exit on any blocker
 .venv/Scripts/python.exe manage.py start_next_year     # advance to the next academic year: create the year after the current one (if needed) and mark it current (idempotent; backs the admin "Start next academic year" button)
 .venv/Scripts/python.exe manage.py purge_empty_line_meetings           # delete legacy line meetings with no note content
@@ -94,6 +94,89 @@ Authentication and authorization are deliberately split:
 
 So "give a user access" = create a Django `User` with the right email (+ a `SchoolProfile` for
 non-superusers). There is no self-service signup.
+
+### Email normalisation (identity depends on it)
+
+Identity is an email string compared across tables with no FK between them, so the spelling of that
+string is load-bearing. `core.identity.normalise_email` is the one definition — stripped, lower case.
+
+`StaffMember` (and `Appraisal.coach_email`, `LineMeeting.created_by_email`) normalise in their own
+`save()`. **`auth.User` is third-party and normalises nowhere** — Django's `create_user` calls
+`normalize_email`, which lower-cases only the *domain* — so an account could sit in the database as
+`A.Green@School.uk` while every record the app held for that person said `a.green@school.uk`. Two
+things now hold the line:
+
+- **Writes**: `core.admin.NormalisingUserAdmin` (a `UserAdmin` subclass, registered over Django's)
+  lower-cases the email on save, and `core.provisioning` only ever creates lower-cased ones. Migration
+  `core/0005_normalise_emails` normalised the existing rows once. `User.username` is deliberately left
+  alone — identity is by email, the username is cosmetic, and it has a unique constraint.
+- **Reads stay case-insensitive anyway** (`iexact`, or `Lower()` on both sides). That is defence in
+  depth, not redundancy: a bulk `.update()`, a fixture or raw SQL can still bypass the write paths.
+  `check_readiness` reports any un-normalised email it finds, because nothing is *broken* by one until
+  the next query that compares exactly — which is precisely how the last such bug got in.
+
+> The unique constraint on `StaffMember.email` means lower-casing can collide. Migration 0005 skips
+> any row whose lower-cased form is already taken rather than raising `IntegrityError` and aborting a
+> deploy; the survivor is reported by `check_readiness` for a human to merge.
+
+### Granting access: `core/provisioning.py`
+
+All the rules for turning a `StaffMember` into a working login live in **`core/provisioning.py`**,
+and three front ends share them so they cannot drift: `StaffMemberAdmin.save_model`, the
+**"Give selected staff a login"** admin action, and `manage.py provision_users`. Every decision is a
+named `ProvisionOutcome` with a matching message in `OUTCOME_MESSAGES`, so **no front end ever skips
+silently** — that was the original bug.
+
+**Saving a `StaffMember` in the admin provisions them**, on *every* save, not just creation. That is
+load-bearing: a person added before their school is known is reported as not-yet-provisionable, and
+setting the school later and saving again finishes the job. The previous CLI-only flow skipped a
+school-less row and never revisited it, so assigning the school afterwards left them permanently
+unable to sign in with nothing on screen to say why — the fault this module was written to remove.
+
+**Both the save hook and the action are superuser-gated, and the gate on `save_model` is the
+load-bearing one.** `list_editable` makes Django's changelist POST call `save_model` once per changed
+row checking only `has_change_permission`, so gating the action alone would be decorative: a user
+with plain change rights could tick every row, nudge a dropdown, and mint a live SSO account for each.
+
+Rules that are deliberate and separately tested:
+- **An existing user is never reactivated.** Deactivating a `User` is how a leaver is offboarded, and
+  provisioning must not quietly undo it. An inactive match returns `SKIPPED_INACTIVE_USER`.
+- **Two active users sharing an email is refused, not resolved.** `auth.User.email` is not unique and
+  the SSO gate can only pick one row (it now does so with an explicit `.order_by("id")`, so the choice
+  is at least deterministic); guessing here would decide someone's access by accident.
+- **`SchoolProfile.school` is re-pointed when the staff member's school changes**, but the `schools`
+  M2M is deliberately left alone — adding without removing would make it a monotonic union, which is
+  the wrong thing to inherit when multi-school scoping arrives.
+- Grants are written to the admin log (`log_change`), so "who gave this person access, and when?" is
+  answerable later.
+
+> **Offboarding — deactivate, never delete.** To revoke access, set the `User` to inactive. Do **not**
+> delete the `User` while leaving the `StaffMember`: provisioning would then see no account at all and
+> mint a fresh one on the next save of that staff row. Deleting the **`StaffMember`** does not revoke
+> anything either — the `User` and `SchoolProfile` survive and still pass the SSO gate — so
+> `StaffMemberAdmin.delete_model` / `delete_queryset` warn and name the accounts to deactivate.
+> `check_readiness` reports deactivated staff as INFO ("access deliberately revoked"), not as a
+> blocker to fix.
+
+**Non-superusers** can still add and edit staff, but never provision: `save_model` returns early with
+an INFO message telling them who to ask, and `get_actions` removes the bulk action entirely rather
+than offering a button that only 403s. `templates/403.html` renders permission denials inside the app
+shell with the raising `PermissionDenied` message, instead of Django's bare unstyled page.
+
+`annotate_login_state` / `login_state_label` drive the **"Can sign in?"** column and filter on the
+staff changelist, via correlated `Exists`/`Count` subqueries so the cost is flat at any roll size. The
+labels are module constants (`LABEL_*`) imported by the filter, so the two agree by construction.
+Each names the **actionable** problem rather than the nearest one — in particular a staff member with
+no school reads *"No — no school on this record"*, not *"no login account"*, because the latter sends
+the administrator to the bulk action which then refuses. The join uses `Lower()` on both sides rather
+than `email__iexact=OuterRef(...)` — `iexact` compiles to `LIKE`, and Django cannot escape a *column*
+on the right-hand side, so an ordinary address like `first_last@school.uk` would act as a wildcard and
+match the wrong user.
+
+Bulk saves are grouped: `list_editable` makes Django call `save_model` once per changed row, so
+outcomes are buffered on the request and `changelist_view` flushes one banner per distinct reason —
+otherwise 200 edited rows meant 200 banners with the summary off-screen.
+
 
 ### Data model notes (`core/models.py`)
 
@@ -435,14 +518,25 @@ will change. The exact column contract for each of the five CSVs is in `docs/imp
 
 **The importer creates `StaffMember` rows, not login accounts.** Because identity is by email with
 no FK between `StaffMember` and `User` (see "Auth & authorization"), imported staff cannot sign in
-until each also has a matching Django `User` + `SchoolProfile`. The required post-import step is
-`manage.py provision_users` (in `core/`; idempotent, `--dry-run` to preview), which creates a `User`
-(username/email = the staff email, unusable local password since auth is SSO-only) and a
-`SchoolProfile` (from `StaffMember.school`) for every `StaffMember` lacking one — skipping-and-
-reporting anyone with no `school` and never touching superusers. It must be run against the same
-database the import went into (i.e. the Azure DB for a production import, not local SQLite). No
-per-person permission setup follows: once `User` + `SchoolProfile` exist, the imported
-`line_manager_email` / `performance_manager_email` relationships drive all view/edit rights.
+until each also has a matching Django `User` + `SchoolProfile`. The required post-import step is to
+run the rules in `core/provisioning.py` over the imported rows — **the importer itself deliberately
+does not provision**, so a CSV upload can never silently mint hundreds of live logins. Two ways:
+
+- **In the admin (usual):** select the imported staff on the `StaffMember` changelist and run
+  **"Give selected staff a login"**. Filter by *Can sign in? → Anyone who cannot sign in* first to see
+  exactly who needs it. Superuser-only. Confirming a **staff** import says this on screen, with a link
+  to that filtered changelist — otherwise "Import confirmed" reads as job-done while nobody imported
+  can actually sign in, which is the same silent dead end this feature exists to remove.
+- **On the server (bulk/scriptable):** `manage.py provision_users` (idempotent, `--dry-run` to
+  preview). Better than the admin action above a few hundred rows, which the action says so itself.
+
+Either way a `User` is created (username/email = the staff email, unusable local password since auth
+is SSO-only) plus a `SchoolProfile` from `StaffMember.school`, for every `StaffMember` lacking one —
+skipping-and-reporting anyone with no `school`, never touching superusers, and never reactivating a
+deactivated leaver. The command must be run against the same database the import went into (i.e. the
+Azure DB for a production import, not local SQLite). No per-person permission setup follows: once
+`User` + `SchoolProfile` exist, the imported `line_manager_email` / `performance_manager_email`
+relationships drive all view/edit rights.
 
 This is the one app that **does** own models for a purely administrative reason — `overview/` and
 `team/` deliberately own none, but an import audit trail (what was uploaded, what it would do, what

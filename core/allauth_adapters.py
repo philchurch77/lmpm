@@ -45,8 +45,17 @@ class RestrictMicrosoftLoginAdapter(DefaultSocialAccountAdapter):
         if not email:
             self._deny(request, "Your Microsoft account did not provide an email address.")
 
-        # Match an existing, pre-provisioned user.
-        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        # Match an existing, pre-provisioned user. auth.User.email is not
+        # unique, so order explicitly: without it the row chosen is whatever the
+        # database returns first, and if only one of a duplicate pair has a
+        # SchoolProfile the same person's login would succeed or fail
+        # unpredictably. core.provisioning refuses to provision duplicates for
+        # this reason, and check_readiness reports them.
+        user = (
+            User.objects.filter(email__iexact=email, is_active=True)
+            .order_by("id")
+            .first()
+        )
         if user is None:
             self._deny(
                 request,

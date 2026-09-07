@@ -102,7 +102,14 @@ these as environment variables, which is exactly what `settings.py` reads.
 |------|-------|
 | `MICROSOFT_CLIENT_ID` | from the Entra app registration |
 | `MICROSOFT_CLIENT_SECRET` | from the Entra app registration |
-| `MICROSOFT_TENANT` | `organizations` or a tenant GUID |
+| `MICROSOFT_TENANT` | **the trust's tenant GUID** (see note below) |
+
+> **Set `MICROSOFT_TENANT` to the trust's tenant GUID, not `organizations`.** The code default is
+> `organizations`, which lets a Microsoft work/school account from *any* Entra tenant reach the
+> sign-in step. The app's own gate still refuses anyone without a pre-provisioned `User`, so this is
+> not an open door — but staff logins can now be created from the Django admin (see "Granting access"
+> in CLAUDE.md), and a mistyped or external email address entered there becomes a genuinely working
+> login only if the tenant is left open. Locking the tenant makes that failure inert.
 
 ### Recommended / situational
 

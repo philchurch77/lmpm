@@ -1127,3 +1127,73 @@ class ClearBlankReviewCellsTests(TestCase):
         confirm_batch(ImportBatch.objects.get(pk=batch.pk))
 
         self.assertEqual(self._refresh().coach_review_comment, "Agreed — met in full.")
+
+
+class ConfirmHandoffMessageTests(TestCase):
+    """Confirming a STAFF import must hand the administrator the next step.
+
+    The importer deliberately never creates logins — a CSV that could mint
+    hundreds of live SSO accounts is exactly the capability this app withholds
+    from the import path. The cost of that is a silent gap: "Import confirmed"
+    reads as "done" while nobody imported can sign in. The message is the only
+    thing closing it, so it is worth a test.
+    """
+
+    def setUp(self):
+        self.super_user = make_user("admin@oxlip.test", is_superuser=True)
+        self.client.force_login(self.super_user)
+        self.school = School.objects.create(name="Copleston High School")
+
+    def _confirm(self, batch):
+        """Confirm through the view, not confirm_batch — the message lives in
+        the view, so calling the service directly would prove nothing."""
+        response = self.client.post(
+            reverse("data_import:preview", args=[batch.pk]),
+            {"action": "confirm"},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        return [str(message) for message in response.context["messages"]]
+
+    def _upload(self, slug, header, *rows):
+        response = upload_and_get_batch(self.client, slug, make_csv(header, *rows))
+        self.assertEqual(response.status_code, 200)
+        return ImportBatch.objects.filter(import_type=SLUGS[slug]).latest("uploaded_at")
+
+    # Catches the staff import reporting success with nothing said about the
+    # imported people being unable to sign in.
+    def test_confirming_a_staff_import_says_they_cannot_sign_in_yet(self):
+        batch = self._upload(
+            "staff",
+            "email,department,job_title,staff_type",
+            "new.teacher@oxlip.test,Maths,Teacher,TEACHING",
+        )
+
+        notes = self._confirm(batch)
+
+        handoff = [note for note in notes if "cannot sign in yet" in note]
+        self.assertEqual(len(handoff), 1, notes)
+        # It must point somewhere useful: the filtered staff changelist.
+        self.assertIn(reverse("admin:core_staffmember_changelist"), handoff[0])
+        self.assertIn("login_state=any_problem", handoff[0])
+        # And it must be true — the import really did not create a login.
+        self.assertFalse(User.objects.filter(email="new.teacher@oxlip.test").exists())
+
+    # Catches the warning being attached to every import type, where it is
+    # simply wrong: a goals import creates no people to provision.
+    def test_confirming_a_goals_import_does_not_mention_signing_in(self):
+        teacher = make_staff(
+            "teacher@oxlip.test", staff_type=StaffMember.StaffType.TEACHING
+        )
+        year = make_academic_year(2025)
+        make_appraisal(teacher, year)
+        batch = self._upload(
+            "goals",
+            "teacher_email,academic_year,goal_type,title",
+            "teacher@oxlip.test,2025,PERSONAL,My personal goal",
+        )
+
+        notes = self._confirm(batch)
+
+        self.assertTrue(any("Import confirmed" in note for note in notes), notes)
+        self.assertFalse(any("cannot sign in yet" in note for note in notes), notes)

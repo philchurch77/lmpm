@@ -11,6 +11,19 @@ from __future__ import annotations
 from .models import StaffMember
 
 
+def normalise_email(value) -> str:
+    """The one way this project spells an email address: stripped, lower case.
+
+    Identity here is an email string compared across tables that have no foreign
+    key between them, so *where* normalisation happens decides whether those
+    comparisons can be exact. ``StaffMember`` and the appraisal/line-meeting
+    models normalise in their own ``save()``; ``auth.User`` is a third-party
+    model that normalises nowhere, which is why reads against it must stay
+    case-insensitive even now that writes go through here.
+    """
+    return (value or "").strip().lower()
+
+
 def current_staff_member(request):
     """The StaffMember matching the logged-in user's email, or None.
 
