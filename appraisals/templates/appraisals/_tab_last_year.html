@@ -1,10 +1,16 @@
-{% if last_year_formset.forms %}
+{# Gated on `previous`, not on `last_year_formset.forms`. Gating on the forms
+   meant that when a formset failed in a way that zeroes TOTAL_FORMS (an
+   unusable management form), the whole panel — including the error include
+   below — vanished, leaving a 200 carrying "Please correct the errors below."
+   above a completely empty tab. `previous` is what actually decides whether
+   this tab exists, and it does not change under a failed POST. #}
+{% if previous %}
   <p class="descriptor-text">Review of goals set in {{ previous.academic_year }}.</p>
 
   <form method="post" action="{% url 'appraisals:last_year_save' pk=appraisal.pk %}" data-warn-unsaved>
     {% csrf_token %}
     {{ last_year_formset.management_form }}
-    {{ last_year_formset.non_form_errors }}
+    {% include "core/_formset_errors.html" with formset=last_year_formset %}
 
     {% for gform in last_year_formset %}
       <div class="reflection-card">

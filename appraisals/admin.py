@@ -11,6 +11,8 @@ from django.urls import path
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
 
+from core.admin_mixins import SuperuserOnlyDeleteMixin
+
 from .goal_review_fix import apply_plan, build_plan, plan_counts, restrict_to_approved
 from .models import (
     AcademicYear,
@@ -203,7 +205,7 @@ class GoalInline(admin.TabularInline):
 
 
 @admin.register(Appraisal)
-class AppraisalAdmin(admin.ModelAdmin):
+class AppraisalAdmin(SuperuserOnlyDeleteMixin, admin.ModelAdmin):
     list_display = ("teacher", "academic_year", "coach_email", "status")
     list_filter = ("status", "academic_year")
     search_fields = ("teacher__email", "coach_email")
@@ -212,7 +214,7 @@ class AppraisalAdmin(admin.ModelAdmin):
 
 
 @admin.register(Goal)
-class GoalAdmin(admin.ModelAdmin):
+class GoalAdmin(SuperuserOnlyDeleteMixin, admin.ModelAdmin):
     list_display = ("appraisal", "order", "goal_type")
     list_filter = ("goal_type",)
     search_fields = ("appraisal__teacher__email", "title")
@@ -307,7 +309,7 @@ class SelfReviewBulletInline(admin.TabularInline):
 
 
 @admin.register(SelfReview)
-class SelfReviewAdmin(admin.ModelAdmin):
+class SelfReviewAdmin(SuperuserOnlyDeleteMixin, admin.ModelAdmin):
     list_display = ("appraisal", "kind")
     list_filter = ("kind",)
     search_fields = ("appraisal__teacher__email",)
@@ -329,7 +331,7 @@ class SelfReviewAdmin(admin.ModelAdmin):
 
 
 @admin.register(SelfReviewItem)
-class SelfReviewItemAdmin(admin.ModelAdmin):
+class SelfReviewItemAdmin(SuperuserOnlyDeleteMixin, admin.ModelAdmin):
     list_display = ("self_review", "order", "code", "heading", "scores")
     search_fields = ("self_review__appraisal__teacher__email", "code", "heading")
     autocomplete_fields = ("self_review",)

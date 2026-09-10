@@ -81,6 +81,20 @@ def meeting_new(request, staff_pk):
     return _render_new(request, member, form)
 
 
+def _existing_duplicate(meeting):
+    """An already-saved meeting identical to this unsaved one, if there is one.
+
+    Compares the staff member, the date and all five note fields — the same
+    natural key the importer hashes into ``ImportRow.source_row_hash``.
+    """
+    match = LineMeeting.objects.filter(
+        staff=meeting.staff, meeting_date=meeting.meeting_date
+    )
+    for field in LineMeeting.NOTE_FIELDS:
+        match = match.filter(**{field: getattr(meeting, field)})
+    return match.first()
+
+
 @login_required
 @require_POST
 def meeting_create(request, staff_pk):
@@ -95,6 +109,19 @@ def meeting_create(request, staff_pk):
         if meeting.is_empty:
             messages.error(request, "Add at least one note before saving the meeting.")
             return _render_new(request, member, form)
+
+        # Double-submit guard. LineMeeting deliberately has no uniqueness
+        # constraint (two genuine meetings can share a staff member and a date),
+        # so a double-clicked "Save meeting" used to create two identical records
+        # — inflating the engagement counts on the overview page and leaving the
+        # manager editing one copy while the other silently diverged. Match on
+        # the full note content, so only a byte-for-byte duplicate is folded in
+        # and a real second meeting on the same day is still created.
+        duplicate = _existing_duplicate(meeting)
+        if duplicate is not None:
+            messages.success(request, "Meeting saved.")
+            return redirect("line_management:meeting_detail", pk=duplicate.pk)
+
         form.save()
         messages.success(request, "Meeting saved.")
         return redirect("line_management:meeting_detail", pk=meeting.pk)
@@ -151,6 +178,16 @@ def meeting_detail(request, pk):
 @login_required
 @require_POST
 def meeting_save(request, pk):
+    # NOTE: a manager who loses the line-management link mid-edit gets a 403 and
+    # their unsaved notes are discarded. That is deliberate and is left alone:
+    # once the link is repointed the viewer has no role at all, which is
+    # indistinguishable at this point from a stranger probing a guessed pk, and
+    # ManagerChangeInheritanceTests fixes the rule that the outgoing manager
+    # loses access *even though they authored the record*. Handing text back here
+    # would mean answering an IDOR probe with something other than a 403, which
+    # is the worse trade. The equivalent appraisal case is handled (see
+    # _save_section) because there the viewer keeps their role and only the lock
+    # changes — a conflict, not a revocation.
     meeting, _staff, role = get_meeting_or_403(request, pk)
     if not can_edit_meeting(role):
         raise PermissionDenied("You may not edit this meeting record.")

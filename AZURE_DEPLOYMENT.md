@@ -80,6 +80,40 @@ project is designed to run on Postgres in production. SQLite is used only for lo
 LMPM is a multi-user SSO app with per-school data — exactly the workload SQLite is poor at on a
 network filesystem. Provision Postgres.
 
+> **The "Backups" row above is a reason to choose Postgres, not evidence that backups are
+> configured.** See the next section — this needs confirming, not assuming.
+
+### Backup and restore — CONFIRM THIS, do not assume it
+
+The application code cannot lose data quietly any more (see the data-safety work below), but every
+remaining destructive path — an admin cascade-delete, a bad import, an operator error, or loss of
+the server — is survivable **only** if a restore exists. Nothing in this repository creates,
+verifies, or tests one.
+
+Azure Database for PostgreSQL Flexible Server takes automated backups by default, but the retention
+window is a per-server setting and the default is short. Before telling the client their data is
+safe, confirm and record all four of these:
+
+| Question | Where to check | Answer |
+|---|---|---|
+| Is automated backup enabled? | Portal → the Postgres server → Backup and restore | **Yes** — point-in-time restore confirmed in place, 2026-09-10 |
+| What is the retention window, in days? | Same blade (default is 7; the maximum is 35) | *not yet recorded — check and fill in* |
+| Is geo-redundant backup on? | Server → Compute + storage | *not yet recorded* |
+| Has a restore actually been tested? | Do one: restore to a *new throwaway* server, confirm the data, then delete it | *not yet tested* |
+
+The retention window is the one to check next: it sets the outer limit on how far back a mistake can
+be undone, and the default of 7 days is short relative to how long a wrongly-cleared appraisal
+comment might go unnoticed — a teacher may not open their record for weeks.
+
+**A restore that has never been tested is not a backup.** UK GDPR Article 32(1)(c) requires the
+ability to restore availability and access to personal data in a timely manner, and 32(1)(d)
+requires a process for regularly testing that ability. A point-in-time restore creates a *new*
+server — it never overwrites the live one — so testing it is non-destructive and safe to do during
+the working day.
+
+Note that a restore is the **only** route back for the paths listed under "Destructive operations"
+in CLAUDE.md. There is deliberately no delete-and-undo in the app itself.
+
 ---
 
 ## 4. Environment variables (Azure "App Settings")

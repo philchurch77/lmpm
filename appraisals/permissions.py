@@ -52,12 +52,31 @@ def appraisal_role(appraisal, staff, user) -> str:
     return ROLE_NONE
 
 
+# The role-only halves of the edit gates, split out from the lock so a refused
+# save can tell the two reasons apart. "You are not the teacher" is a genuine
+# permission denial; "you are the teacher but this was signed off while you were
+# typing" is a conflict, and the caller hands the user's text back rather than
+# discarding it behind a 403. Each gate carries its role-only half as
+# ``.role_only`` so views can ask the question without a second lookup table
+# that could drift out of step with the gate itself.
+def has_teacher_role(appraisal, role) -> bool:
+    return role in {ROLE_TEACHER, ROLE_SUPER}
+
+
+def has_coach_role(appraisal, role) -> bool:
+    return role in {ROLE_COACH, ROLE_SUPER}
+
+
 def can_edit_teacher_fields(appraisal, role) -> bool:
-    return role in {ROLE_TEACHER, ROLE_SUPER} and not appraisal.is_locked
+    return has_teacher_role(appraisal, role) and not appraisal.is_locked
 
 
 def can_edit_coach_fields(appraisal, role) -> bool:
-    return role in {ROLE_COACH, ROLE_SUPER} and not appraisal.is_locked
+    return has_coach_role(appraisal, role) and not appraisal.is_locked
+
+
+can_edit_teacher_fields.role_only = has_teacher_role
+can_edit_coach_fields.role_only = has_coach_role
 
 
 def get_appraisal_or_403(request, pk):

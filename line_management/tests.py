@@ -488,3 +488,114 @@ class EmptyRecordTests(TestCase):
         empty = make_meeting(self.staff)
         call_command("purge_empty_line_meetings", "--dry-run")
         self.assertTrue(LineMeeting.objects.filter(pk=empty.pk).exists())
+
+
+class DoubleSubmitGuardTests(TestCase):
+    """meeting_create's _existing_duplicate: one meeting per submission.
+
+    LineMeeting deliberately carries no uniqueness constraint, because two
+    genuine meetings can share a staff member and a date. That left a
+    double-clicked "Save meeting" (or a browser retry on a slow POST) creating
+    two identical records: the engagement counts on the overview page were
+    inflated, and the manager went on editing one copy while the other sat
+    frozen with the original text — a silent divergence nobody sees until
+    somebody reads the wrong one.
+
+    The guard therefore has to be exact in both directions, so both are pinned:
+    a byte-for-byte repeat is folded into the record already saved, and a
+    genuinely different second meeting on the same day is still created.
+    """
+
+    def setUp(self):
+        self.manager_email = "lead@oxlip.test"
+        self.manager_user = make_user(self.manager_email)
+        self.manager = make_staff(self.manager_email)
+
+        self.report = make_staff(
+            "managed@oxlip.test", line_manager_email=self.manager_email
+        )
+        make_user("managed@oxlip.test")
+
+        self.create_url = reverse(
+            "line_management:meeting_create", args=[self.report.pk]
+        )
+        self.client.force_login(self.manager_user)
+
+    def _post(self, **overrides):
+        payload = {
+            "meeting_date": "2026-02-01",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Discussed timetable and cover.",
+            "actions_from_meeting": "",
+        }
+        payload.update(overrides)
+        return self.client.post(self.create_url, payload)
+
+    # Catches the double-click duplicate: two identical POSTs, one record.
+    def test_identical_create_post_twice_creates_only_one_meeting(self):
+        first = self._post()
+        second = self._post()
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 302)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+
+    # Catches the second submit landing somewhere else — on a fresh blank form,
+    # or on a second record — instead of on the meeting that was actually saved.
+    def test_second_identical_post_redirects_to_the_same_meeting(self):
+        first = self._post()
+        second = self._post()
+
+        meeting = LineMeeting.objects.get(staff=self.report)
+        expected = reverse("line_management:meeting_detail", args=[meeting.pk])
+        self.assertEqual(first["Location"], expected)
+        self.assertEqual(second["Location"], expected)
+
+    # Catches the guard being over-eager: two real meetings with the same person
+    # on the same day are legitimate, and the second must not be swallowed just
+    # because the date matches.
+    def test_same_staff_and_date_with_different_notes_creates_a_second_meeting(self):
+        self._post(main_matters="Morning catch-up about cover.")
+        self._post(main_matters="Afternoon follow-up about the trip.")
+
+        meetings = LineMeeting.objects.filter(staff=self.report)
+        self.assertEqual(meetings.count(), 2)
+        self.assertEqual(
+            sorted(m.main_matters for m in meetings),
+            [
+                "Afternoon follow-up about the trip.",
+                "Morning catch-up about cover.",
+            ],
+        )
+
+    # Catches the guard matching on only some of the note fields: a repeat that
+    # differs in ONE section is a different meeting and must still be created.
+    def test_difference_in_any_single_note_field_creates_a_second_meeting(self):
+        self._post(actions_from_meeting="")
+        self._post(actions_from_meeting="Book the room for next time.")
+
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 2)
+
+    # Catches the guard reaching across staff members — identical notes written
+    # for two different reports are two records, not one.
+    def test_identical_notes_for_a_different_report_are_not_folded_together(self):
+        other = make_staff("second@oxlip.test", line_manager_email=self.manager_email)
+        make_user("second@oxlip.test")
+        payload = {
+            "meeting_date": "2026-02-01",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Standing agenda item.",
+            "actions_from_meeting": "",
+        }
+
+        self.client.post(self.create_url, payload)
+        self.client.post(
+            reverse("line_management:meeting_create", args=[other.pk]), payload
+        )
+
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        self.assertEqual(LineMeeting.objects.filter(staff=other).count(), 1)

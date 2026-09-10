@@ -1,0 +1,31 @@
+{% extends "core/base.html" %}
+{% block title %}Your changes were not saved{% endblock %}
+
+{% block content %}
+<div class="reflection-card">
+  <div class="reflection-card-header">{{ heading }}</div>
+  <div class="reflection-card-body">
+    <p>{{ explanation }}</p>
+
+    {% if submitted %}
+      <p><strong>Nothing you typed has been thrown away.</strong> It is shown below
+      exactly as you submitted it — copy anything you need before you leave this
+      page, because it is not stored anywhere.</p>
+
+      {% for label, value in submitted %}
+        <div class="field-row">
+          <label for="recovered-{{ forloop.counter }}">{{ label }}</label>
+          <textarea id="recovered-{{ forloop.counter }}" rows="6" readonly
+                    data-max-words="0">{{ value }}</textarea>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p>There was no text in what you submitted.</p>
+    {% endif %}
+
+    <div class="actions">
+      <a class="button" href="{{ back_url }}" data-skip-unsaved-check>{{ back_label }}</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

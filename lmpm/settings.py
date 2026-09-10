@@ -221,8 +221,26 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 3600  # raise (e.g. 31536000) once the deployment is proven
+    # Raised from 3600. At an hour, a user whose HSTS entry had aged out could
+    # follow an http:// bookmark and submit a form; the security middleware
+    # answers with a 301, browsers turn a redirected POST into a GET and drop the
+    # body, and the form reloads empty with no error. The deployment is proven.
+    SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True  # the app host has no subdomains; safe
+
+# Sessions. Django's default is a fixed two-week expiry measured from LOGIN and
+# never extended by activity, so a user who signed in a fortnight ago is logged
+# out mid-sentence no matter how busy they have been. When that happens the POST
+# body is discarded by @login_required, the user is round-tripped through
+# Microsoft (SOCIALACCOUNT_LOGIN_ON_GET sends them straight back), and the page
+# reloads from the database — empty. unsaved_changes.js cannot help, because it
+# stands down on submit.
+#
+# Refreshing the cookie on every request means an active writer's session cannot
+# lapse underneath them; the shorter absolute age is then safe, and is the better
+# setting anyway for shared staffroom machines.
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_COOKIE_AGE = 60 * 60 * 12  # 12 hours of inactivity
 
 
 SITE_ID = 1

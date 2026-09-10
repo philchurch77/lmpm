@@ -1,6 +1,10 @@
 <form method="post" action="{% url 'appraisals:summary_save' pk=appraisal.pk %}" data-warn-unsaved>
   {% csrf_token %}
 
+  {# This template previously rendered no error output whatsoever, so any
+     validation failure here showed the banner and nothing else. #}
+  {% include "core/_error_summary.html" with form=summary_form %}
+
   <div class="reflection-card">
     <div class="reflection-card-header">CPD &amp; comments</div>
     <div class="reflection-card-body">

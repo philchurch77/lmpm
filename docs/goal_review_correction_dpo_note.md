@@ -119,8 +119,20 @@ explained.
   confirmation and downloaded to the operator. It is *not* written to the
   server, deliberately: it contains named performance commentary and the Azure
   working directory is not a controlled location.
-- **Reversibility.** A database backup is taken before the run, and the source
-  data remains in the SharePoint list, which is unchanged throughout.
+- **Reversibility.** The correction **moves** text rather than deleting it: the
+  target field is written first and the source blanked second, inside a single
+  database transaction, and the run refuses to write onto a target that already
+  holds text. Every value moved is therefore still in the database afterwards,
+  and the before/after record above identifies exactly which goals changed.
+  The source data also remains in the SharePoint list, which is unchanged
+  throughout.
+
+  > This entry previously read "A database backup is taken before the run."
+  > That was not accurate: nothing in the tooling took a backup, and the
+  > command's `--backup-file` argument produces the before/after record
+  > described above, not a database dump. Whether a point-in-time restore is
+  > available is a property of the Azure Postgres server (see
+  > AZURE_DEPLOYMENT.md), not of this exercise.
 
 ## 6. Retention of the extract
 

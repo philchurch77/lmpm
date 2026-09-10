@@ -224,12 +224,16 @@ def apply_appraisal_summary_row(data: dict, resolved: dict):
     staff = resolved["staff"]
     year = resolved["year"]
 
-    coach_email = data.get("coach_email", "").strip()
-    defaults = {
-        "coach_email": normalise_email(coach_email)
-        if coach_email
-        else staff.performance_manager_email
-    }
+    # coach_email is a deliberate SNAPSHOT (appraisals/models.py) and it drives
+    # who may edit the record, so a re-upload must not rewrite it. It used to be
+    # written into defaults unconditionally — the one field here that bypassed
+    # _set_if_present — so re-importing a summary CSV with the column blank, or
+    # absent entirely, silently replaced every matched appraisal's stored coach
+    # with the staff member's *current* performance manager. That rewrites
+    # history and can move edit rights between people, with nothing on the
+    # preview to say so.
+    defaults = {}
+    _set_if_present(data, defaults, "coach_email", transform=normalise_email)
     if resolved.get("status"):
         defaults["status"] = resolved["status"]
     if resolved.get("pay_award"):
@@ -248,8 +252,16 @@ def apply_appraisal_summary_row(data: dict, resolved: dict):
     ):
         _set_if_present(data, defaults, text_field)
 
+    # Falling back to the current performance manager is right when there is no
+    # snapshot yet, but only then — hence create_defaults rather than defaults.
+    create_defaults = dict(defaults)
+    create_defaults.setdefault("coach_email", staff.performance_manager_email)
+
     appraisal, created = Appraisal.objects.update_or_create(
-        teacher=staff, academic_year=year, defaults=defaults
+        teacher=staff,
+        academic_year=year,
+        defaults=defaults,
+        create_defaults=create_defaults,
     )
     if created:
         appraisal.seed_goals()

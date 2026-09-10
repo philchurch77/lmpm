@@ -1,0 +1,19 @@
+{% comment %}
+The formset equivalent of core/_error_summary.html: non-form errors, then every
+error on every child form. Used at the top of each tab's <form> so a validation
+failure buried in one row of a formset is always visible, rather than depending
+on the row's template having wired up that particular field.
+
+  {% include "core/_formset_errors.html" with formset=goal_formset %}
+{% endcomment %}
+{% if formset.non_form_errors %}
+  {# Wrapped in .field-errors deliberately: unsaved_changes.js keys its
+     "this page holds unsaved work" detection on that class, and Django emits
+     non-form errors as <ul class="errorlist nonform"> — so without this a
+     formset-level failure re-rendered the user's text with no dirty marking
+     and no warning when they navigated away. #}
+  <div class="field-errors">{{ formset.non_form_errors }}</div>
+{% endif %}
+{% for form in formset %}
+  {% include "core/_error_summary.html" with form=form %}
+{% endfor %}

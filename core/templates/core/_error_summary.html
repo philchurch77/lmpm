@@ -1,0 +1,32 @@
+{% comment %}
+Renders EVERY error on one form — non-field errors and each field's errors,
+labelled — as a single block at the top of the form.
+
+This exists because "Please correct the errors below." was being shown above a
+page with no error anywhere below it. _tab_summary.html rendered no errors at
+all; _tab_self_review.html never rendered self_review_form's errors, so a
+signed_name over its 200-character limit failed the whole save with nothing on
+screen to say why — and because _save_section requires every target form to be
+valid before saving any of them, an entire self-review's evidence and scores
+went unsaved with no visible cause.
+
+Include it per form rather than relying on each field being wired up
+individually, so a field added later cannot silently fail with an invisible
+error:
+
+  {% include "core/_error_summary.html" with form=summary_form %}
+{% endcomment %}
+{% if form.errors %}
+  <div class="field-errors form-error-summary" role="alert">
+    <ul>
+      {% for err in form.non_field_errors %}
+        <li>{{ err }}</li>
+      {% endfor %}
+      {% for field in form %}
+        {% for err in field.errors %}
+          <li>{% if field.label %}<strong>{{ field.label }}:</strong> {% endif %}{{ err }}</li>
+        {% endfor %}
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}

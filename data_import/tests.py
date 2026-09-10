@@ -1197,3 +1197,139 @@ class ConfirmHandoffMessageTests(TestCase):
 
         self.assertTrue(any("Import confirmed" in note for note in notes), notes)
         self.assertFalse(any("cannot sign in yet" in note for note in notes), notes)
+
+
+class CoachEmailSnapshotOnReimportTests(TestCase):
+    """A re-import must never rewrite an existing Appraisal's coach_email.
+
+    coach_email is a deliberate SNAPSHOT (appraisals/models.py) and it is also
+    an access-control field: appraisal_role() grants ROLE_COACH from it, so
+    whoever it names can read and write that person's appraisal. It used to be
+    written into update_or_create's defaults unconditionally — the one field in
+    apply_appraisal_summary_row that bypassed _set_if_present — so re-uploading
+    a summary CSV with the column blank, or absent altogether, silently
+    replaced every matched appraisal's recorded coach with the staff member's
+    *current* performance manager. That rewrites history and moves edit rights
+    between people, with nothing on the preview page to say it is happening.
+
+    The fallback is still right for a brand-new appraisal, where there is no
+    snapshot to protect — hence create_defaults rather than defaults, and hence
+    the last test here.
+    """
+
+    def setUp(self):
+        self.super_user = make_user("admin@oxlip.test", is_superuser=True)
+        self.client.force_login(self.super_user)
+        self.teacher = make_staff(
+            "teacher@oxlip.test",
+            performance_manager_email="new.coach@oxlip.test",
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        self.year = make_academic_year(2025)
+
+    def _upload(self, header, *rows):
+        response = upload_and_get_batch(
+            self.client, "appraisal-summaries", make_csv(header, *rows)
+        )
+        self.assertEqual(response.status_code, 200)
+        return ImportBatch.objects.filter(
+            import_type=ImportType.APPRAISAL_SUMMARY
+        ).latest("uploaded_at")
+
+    def _existing_appraisal(self):
+        return make_appraisal(self.teacher, self.year, coach_email="original@x.test")
+
+    # Catches a present-but-empty coach_email cell overwriting the stored
+    # snapshot with the staff member's current performance manager.
+    def test_blank_coach_email_cell_leaves_an_existing_snapshot_alone(self):
+        appraisal = self._existing_appraisal()
+
+        batch = self._upload(
+            "teacher_email,academic_year,coach_email,status",
+            "teacher@oxlip.test,2025,,SHARED",
+        )
+        confirm_batch(batch)
+
+        appraisal.refresh_from_db()
+        self.assertEqual(appraisal.coach_email, "original@x.test")
+        # The rest of the row still applied — this is a targeted guard, not a
+        # blanket refusal to update the appraisal.
+        self.assertEqual(appraisal.status, Appraisal.Status.SHARED)
+
+    # Catches the same overwrite via a narrower CSV that never mentions the
+    # column at all — the more likely real-world upload of the two.
+    def test_absent_coach_email_column_leaves_an_existing_snapshot_alone(self):
+        appraisal = self._existing_appraisal()
+
+        batch = self._upload(
+            "teacher_email,academic_year,status",
+            "teacher@oxlip.test,2025,SHARED",
+        )
+        confirm_batch(batch)
+
+        appraisal.refresh_from_db()
+        self.assertEqual(appraisal.coach_email, "original@x.test")
+        self.assertEqual(appraisal.status, Appraisal.Status.SHARED)
+
+    # Catches the guard being written so broadly that a deliberate, populated
+    # coach_email cell can no longer correct a wrong snapshot.
+    def test_explicit_coach_email_cell_still_updates_an_existing_appraisal(self):
+        appraisal = self._existing_appraisal()
+
+        batch = self._upload(
+            "teacher_email,academic_year,coach_email",
+            "teacher@oxlip.test,2025,corrected@x.test",
+        )
+        confirm_batch(batch)
+
+        appraisal.refresh_from_db()
+        self.assertEqual(appraisal.coach_email, "corrected@x.test")
+
+    # Catches the fallback being lost when it moved from defaults to
+    # create_defaults: a NEW appraisal with no coach_email cell must still pick
+    # up the staff member's current performance manager, or nobody can coach it.
+    def test_new_appraisal_with_no_coach_email_still_falls_back_to_the_manager(self):
+        self.assertFalse(Appraisal.objects.filter(teacher=self.teacher).exists())
+
+        batch = self._upload(
+            "teacher_email,academic_year,status",
+            "teacher@oxlip.test,2025,DRAFT",
+        )
+        confirm_batch(batch)
+
+        appraisal = Appraisal.objects.get(teacher=self.teacher, academic_year=self.year)
+        self.assertEqual(appraisal.coach_email, "new.coach@oxlip.test")
+
+    # ...including when the cell is present and empty, which is the shape the
+    # create path most often sees from a spreadsheet export.
+    def test_new_appraisal_with_a_blank_coach_email_cell_falls_back_too(self):
+        batch = self._upload(
+            "teacher_email,academic_year,coach_email",
+            "teacher@oxlip.test,2025,",
+        )
+        confirm_batch(batch)
+
+        appraisal = Appraisal.objects.get(teacher=self.teacher, academic_year=self.year)
+        self.assertEqual(appraisal.coach_email, "new.coach@oxlip.test")
+
+    # Catches a re-import re-running the fallback on the SECOND pass: the guard
+    # only means anything if it survives the appraisal already existing because
+    # the importer itself created it a moment earlier.
+    def test_reimport_of_an_import_created_appraisal_keeps_its_first_coach(self):
+        first = self._upload(
+            "teacher_email,academic_year,coach_email",
+            "teacher@oxlip.test,2025,first.coach@x.test",
+        )
+        confirm_batch(first)
+
+        self.teacher.performance_manager_email = "someone.else@x.test"
+        self.teacher.save()
+
+        second = self._upload(
+            "teacher_email,academic_year,status",
+            "teacher@oxlip.test,2025,SIGNED_OFF",
+        )
+        confirm_batch(second)
+
+        appraisal = Appraisal.objects.get(teacher=self.teacher, academic_year=self.year)
+        self.assertEqual(appraisal.coach_email, "first.coach@x.test")

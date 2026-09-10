@@ -18,19 +18,23 @@ from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import Permission, User
+from django.template.loader import render_to_string
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.exceptions import PermissionDenied
 from django.core.management import call_command
+from django.http import QueryDict
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
 from allauth.core.exceptions import ImmediateHttpResponse
 
-from appraisals.models import AcademicYear
+from appraisals.models import AcademicYear, Appraisal, Goal, SelfReview, SelfReviewItem
+from line_management.models import LineMeeting
 
 from .allauth_adapters import RestrictMicrosoftLoginAdapter
+from .recovery import submitted_text
 from .models import School, SchoolProfile, StaffMember
 from .provisioning import (
     LABEL_ADMIN,
@@ -1159,3 +1163,268 @@ class BulkInlineSaveMessageTests(TestCase):
         self.assertEqual(len(provisioning), 1, provisioning)
         self.assertIn("3", provisioning[0])
         self.assertIn("staff0@oxlip.test", provisioning[0])
+
+
+def post_data(pairs):
+    """A QueryDict in the same shape (and order) a real form POST arrives in.
+
+    ``submitted_text`` iterates the POST directly, so the ordering guarantee it
+    documents ("reads down the page the way the user wrote it") only holds for
+    a real QueryDict — a plain dict would not exercise it.
+    """
+    qd = QueryDict(mutable=True)
+    for key, value in pairs:
+        qd[key] = value
+    return qd
+
+
+class SubmittedTextTests(TestCase):
+    """core.recovery.submitted_text: what gets handed back after a refused save.
+
+    Two failure modes matter here and they pull in opposite directions. Echo
+    too little and the user loses the paragraph the whole feature exists to
+    save. Echo too much and the recovery page fills with CSRF tokens, hidden
+    primary keys and one-character scores, burying the prose underneath — which
+    is the same data loss with extra steps, because nobody scrolls.
+    """
+
+    # Catches the CSRF token being rendered back into the page as if it were
+    # something the user typed.
+    def test_csrf_token_is_never_echoed_back(self):
+        result = submitted_text(
+            post_data(
+                [
+                    ("csrfmiddlewaretoken", "a" * 64),
+                    ("job_summary", "I taught Year 9 all year."),
+                ]
+            )
+        )
+
+        self.assertEqual(result, [("Job summary", "I taught Year 9 all year.")])
+
+    # Catches formset bookkeeping ("30", "1000") being presented as prose.
+    def test_formset_management_keys_are_skipped(self):
+        result = submitted_text(
+            post_data(
+                [
+                    ("items-TOTAL_FORMS", "30"),
+                    ("items-INITIAL_FORMS", "30"),
+                    ("items-MIN_NUM_FORMS", "0"),
+                    ("items-MAX_NUM_FORMS", "1000"),
+                    ("bullets-TOTAL_FORMS", "112"),
+                    ("bullets-INITIAL_FORMS", "112"),
+                    ("bullets-MIN_NUM_FORMS", "0"),
+                    ("bullets-MAX_NUM_FORMS", "1000"),
+                ]
+            )
+        )
+
+        self.assertEqual(result, [])
+
+    # Catches hidden formset plumbing — the round-tripped primary keys and the
+    # delete flags — surfacing as recovered "text".
+    def test_hidden_ids_and_delete_flags_are_skipped(self):
+        result = submitted_text(
+            post_data(
+                [
+                    ("items-0-id", "4471"),
+                    ("items-0-DELETE", "on"),
+                    ("items-0-evidence", "Book scrutiny in November."),
+                ]
+            )
+        )
+
+        self.assertEqual(result, [("Evidence (row 1)", "Book scrutiny in November.")])
+
+    # Regression: single-character values must be KEPT.
+    #
+    # This page exists to be truthful about what a refused save did not store,
+    # and it says "Nothing you typed has been thrown away." An earlier version
+    # skipped values under two characters as presumed radio/date noise — but
+    # every per-bullet self-review score posts as exactly one character, so a
+    # teacher who had scored forty descriptors was shown their evidence, told
+    # nothing was lost, and given none of their scores. Empty values are still
+    # dropped, since there is nothing to hand back.
+    def test_single_character_values_such_as_scores_are_kept(self):
+        result = submitted_text(
+            post_data(
+                [
+                    ("bullets-0-score", "3"),
+                    ("upr_declaration_agreed", ""),
+                    ("initial", " x "),
+                    ("signed_name", "AB"),
+                ]
+            )
+        )
+
+        self.assertEqual(
+            result,
+            [
+                ("Score (row 1)", "3"),
+                ("Initial", "x"),
+                ("Signed name", "AB"),
+            ],
+        )
+
+    # Catches the row number being echoed 0-based, so the label points a user at
+    # the wrong row of a 30-row self-review.
+    def test_indexed_key_is_humanised_to_a_one_based_row_number(self):
+        result = submitted_text(
+            post_data([("items-3-evidence", "Evidence for the fourth group.")])
+        )
+
+        self.assertEqual(
+            result, [("Evidence (row 4)", "Evidence for the fourth group.")]
+        )
+
+    # Catches an unindexed field losing its label entirely, or keeping its raw
+    # underscored form name.
+    def test_plain_key_is_humanised_without_a_row_number(self):
+        result = submitted_text(
+            post_data([("summary_teacher_comment", "A strong year overall.")])
+        )
+
+        self.assertEqual(
+            result, [("Summary teacher comment", "A strong year overall.")]
+        )
+
+    # Catches the order being rearranged (e.g. by sorting the keys), so the
+    # recovered text no longer reads down the page as it was written.
+    def test_order_follows_the_submitted_form(self):
+        result = submitted_text(
+            post_data(
+                [
+                    ("items-1-evidence", "Second group evidence."),
+                    ("items-0-evidence", "First group evidence."),
+                ]
+            )
+        )
+
+        self.assertEqual(
+            [label for label, _ in result],
+            ["Evidence (row 2)", "Evidence (row 1)"],
+        )
+
+
+class SuperuserOnlyDeleteTests(TestCase):
+    """SuperuserOnlyDeleteMixin on every model that holds staff-written text.
+
+    Non-superusers are deliberately given staff-admin rights over StaffMember,
+    so the admin surface exists for them by design. Deleting one Appraisal
+    cascades a whole year of someone's writing — goals, self-review, items,
+    per-bullet scores — in a single confirm with no undo and no backup behind
+    it, so the check is asserted against the *registered* admin instances
+    rather than the mixin in isolation: a class that stops mixing it in is the
+    regression this catches.
+    """
+
+    # Registered in appraisals/admin.py and line_management/admin.py.
+    GATED_MODELS = (Appraisal, Goal, SelfReview, SelfReviewItem, LineMeeting)
+
+    def setUp(self):
+        from django.contrib import admin as django_admin
+
+        self.registry = django_admin.site._registry
+        self.superuser = make_user("admin@oxlip.test", is_superuser=True)
+        self.office = User.objects.create_user(
+            username="office@oxlip.test",
+            email="office@oxlip.test",
+            password="pw",
+            is_staff=True,
+        )
+        # Grant the real Django delete permission on every gated model. Without
+        # it the user would be refused anyway and this suite would still pass
+        # with the mixin deleted — the point is that the model permission is
+        # no longer sufficient on its own.
+        for model in self.GATED_MODELS:
+            self.office.user_permissions.add(
+                Permission.objects.get(
+                    content_type=ContentType.objects.get_for_model(model),
+                    codename=f"delete_{model._meta.model_name}",
+                )
+            )
+        self.office = User.objects.get(pk=self.office.pk)  # drop the perm cache
+
+    def _request(self, user):
+        request = RequestFactory().get("/admin/")
+        request.user = user
+        return request
+
+    # Catches a staff user with the model delete permission still being able to
+    # destroy a year of someone's PD record.
+    def test_non_superuser_has_no_delete_permission_on_staff_text_models(self):
+        request = self._request(self.office)
+        for model in self.GATED_MODELS:
+            with self.subTest(model=model.__name__):
+                model_admin = self.registry[model]
+                self.assertFalse(model_admin.has_delete_permission(request))
+                self.assertFalse(model_admin.has_delete_permission(request, obj=None))
+
+    # Catches the gate being tightened so far that nobody can ever delete,
+    # which would push the work onto raw SQL instead.
+    def test_superuser_keeps_delete_permission_on_staff_text_models(self):
+        request = self._request(self.superuser)
+        for model in self.GATED_MODELS:
+            with self.subTest(model=model.__name__):
+                self.assertTrue(self.registry[model].has_delete_permission(request))
+
+    # Catches the changelist still offering "Delete selected", which Django
+    # builds independently of has_delete_permission.
+    def test_delete_selected_is_not_offered_to_a_non_superuser(self):
+        request = self._request(self.office)
+        for model in self.GATED_MODELS:
+            with self.subTest(model=model.__name__):
+                self.assertNotIn(
+                    "delete_selected", self.registry[model].get_actions(request)
+                )
+
+    # ...and is still offered to a superuser, so the removal above is not just
+    # "no actions for anyone".
+    def test_delete_selected_is_still_offered_to_a_superuser(self):
+        request = self._request(self.superuser)
+        for model in self.GATED_MODELS:
+            with self.subTest(model=model.__name__):
+                self.assertIn(
+                    "delete_selected", self.registry[model].get_actions(request)
+                )
+
+
+class FormsetErrorMarkupTests(TestCase):
+    """core/_formset_errors.html must mark formset-level errors as .field-errors.
+
+    unsaved_changes.js keys its "this page is holding unsaved work" detection on
+    the ``.field-errors`` class, and seeds the form as dirty when it finds one.
+    Django renders formset non-form errors as ``<ul class="errorlist nonform">``,
+    which carries no such class — so before this wrapper, a formset-level
+    validation failure re-rendered all of the user's typed text with the form
+    marked clean. Navigating away from that page discarded it with no warning,
+    which is the exact gap the dirty-seeding was added to close.
+    """
+
+    def _render(self, formset):
+        return render_to_string("core/_formset_errors.html", {"formset": formset})
+
+    def test_non_form_errors_are_wrapped_in_field_errors(self):
+        class Stub:
+            def non_form_errors(self):
+                return ["ManagementForm data is missing."]
+
+            def __iter__(self):
+                return iter(())
+
+        html = self._render(Stub())
+        self.assertIn("field-errors", html)
+        self.assertIn("ManagementForm data is missing.", html)
+
+    def test_nothing_is_rendered_when_there_are_no_errors(self):
+        class Stub:
+            def non_form_errors(self):
+                return []
+
+            def __iter__(self):
+                return iter(())
+
+        html = self._render(Stub())
+        # Critical: a clean page must NOT contain the marker, or every ordinary
+        # page load would be treated as holding unsaved work and warn on exit.
+        self.assertNotIn("field-errors", html)

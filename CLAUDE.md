@@ -601,6 +601,78 @@ counts as present-and-empty and *will* clear. See `docs/import_templates.md`.
   behaviour per import type, the self-review seed-once-per-group + evidence-on-bullet-order-1 rules,
   and the cross-batch `LineMeeting` dedupe (the central idempotency guarantee of this feature).
 
+## Data safety — invariants that must not be regressed
+
+The client's assurance is that **no staff-entered text is ever silently lost**. These rules are load-
+bearing for that claim; each was written to close a defect that had actually shipped.
+
+- **Client-side helpers MEASURE, they never MUTATE.** `core/static/core/word_limit.js` shows a word
+  counter and nothing else. It used to call an `enforce()` helper that rewrote `textarea.value` — and
+  did so once at page load, before the user had touched anything — so opening a record longer than the
+  limit truncated it on screen, and the next save persisted the deletion under a green "saved" message.
+  It was destructive twice over: the rebuild used `words.join(" ")`, flattening every paragraph break
+  in the *surviving* text. Setting `.value` in script fires no `input` event, so `unsaved_changes.js`
+  never saw it and never warned. **Never reintroduce a client-side truncation.** The limit is guidance;
+  every narrative field is an unbounded `TextField` and there is no server-side cap to match.
+  (The cap was 300 words from the initial commit until 2026-08-28, applied to every appraisal textarea —
+  only `line_management` opted out via `data-max-words="0"` — so historic imported text may already
+  have been truncated in production during that window.)
+- **Every form's errors must reach the page.** Include `core/_error_summary.html` (a single form) or
+  `core/_formset_errors.html` (a formset) at the top of each `<form>`. `_tab_summary.html` once rendered
+  no error output at all and `_tab_self_review.html` never rendered `self_review_form`'s errors, so a
+  `signed_name` over its 200-char limit failed the entire save behind "Please correct the errors below."
+  with nothing below it — and because `_save_section` requires *all* target forms to validate before
+  saving *any*, a whole self-review went unsaved with no visible cause. Wire the summary include rather
+  than per-field `{% if %}`s, so a field added later cannot fail invisibly.
+- **A refused save hands the text back; it does not discard it.** `_save_section` distinguishes "you
+  were never allowed to edit this" (403) from "this was signed off while you were typing" (409 +
+  `core/recovery.py` → `save_blocked.html`). Each gate in `appraisals/permissions.py` carries its
+  role-only half as `.role_only` so the two reasons stay distinguishable. Note **re-rendering the bound
+  page does not work** for this: once locked, every field is built `disabled`, and Django reads a
+  disabled field from its initial, so the user's words would be replaced by the stored ones. Only the
+  raw POST is echoed — never anything read from the record — which is what makes it safe to show to
+  someone who has just lost access.
+  > `line_management.meeting_save` deliberately does **not** do this. There, losing the line-management
+  > link removes the viewer's role entirely, which is indistinguishable from an IDOR probe, and
+  > `ManagerChangeInheritanceTests` fixes the rule that the outgoing manager loses access *even as the
+  > record's author*. Answering a probe with anything but a 403 is the worse trade.
+- **One save is one transaction.** `_save_section` wraps its formset saves in `transaction.atomic()`.
+  The self-review tab writes three separate formsets; without this, a failure part-way committed the
+  evidence but not the scores, and the page gave the user no way to tell what had landed.
+- **The deploy fails loudly.** `startup.sh` lets `migrate` and `collectstatic` failures abort the boot.
+  They used to be `|| echo "(continuing)"`, which defeated `set -e` on purpose: the GitHub Actions run
+  reports on package upload rather than boot, so a deploy went green while the app served a stale schema
+  and every save 500'd. `collectstatic` is the more dangerous of the two — `DEBUG=0` selects
+  `CompressedManifestStaticFilesStorage` and `staticfiles/` is gitignored, so a missing manifest takes
+  the whole site down while still answering the port, passing Azure's warm-up probe. Only the seeds stay
+  tolerant, since the app is usable without them.
+- **Sessions refresh on activity.** `SESSION_SAVE_EVERY_REQUEST = True` with a 12-hour
+  `SESSION_COOKIE_AGE`. Django's default expiry is measured from *login* and never extended, so a user
+  was logged out mid-sentence; the POST body was then discarded by `@login_required`, and
+  `unsaved_changes.js` could not warn because it stands down on submit.
+- **Deleting staff text in the admin is superuser-only** (`core/admin_mixins.SuperuserOnlyDeleteMixin`).
+  One `Appraisal` delete cascades its goals, self-review, items, per-bullet scores, leader review and
+  standards. The mixin also drops `delete_selected`, which Django offers independently of
+  `has_delete_permission`.
+- **A blank import cell never overwrites** — including `coach_email`, which used to be the one field in
+  `apply_appraisal_summary_row` bypassing `_set_if_present`. Re-importing with that column blank *or
+  absent* rewrote every matched appraisal's coach snapshot to the staff member's current performance
+  manager, silently moving edit rights. The create-time fallback now lives in `create_defaults`.
+- **The one destructive import option remains `clear_blank_fields`** — goals upload only, two review-
+  comment fields only. See "The one destructive option" above.
+
+**Known remaining gap (not fixed, deliberately):** saves are last-write-wins with no version check, so
+one person with the same record open in two browser tabs can overwrite themselves. Cross-*role*
+clobbering is already prevented — fields the poster may not edit are `disabled`, and Django then reads
+them from the freshly-loaded instance rather than the stale POST. Closing the remaining case properly
+needs an `updated_at` on `Goal` / `SelfReviewItem` / `SelfReviewBullet` (none have one) plus per-row
+version checks threaded through three formsets, which is a real change to the save paths that currently
+work correctly.
+
+**Backup is infrastructure, not code.** Nothing in this repo creates or verifies one. See
+"Backup and restore" in AZURE_DEPLOYMENT.md — it must be confirmed on the Azure server, and a restore
+must actually have been tested, before anyone tells the client the data is safe.
+
 ## Configuration & deployment
 
 - `settings.py` reads everything from environment variables (loaded from a local `.env` in dev via

@@ -388,7 +388,10 @@ class AppraisalLockingTests(TestCase):
     def test_teacher_cannot_save_self_review_once_signed_off(self):
         self.client.force_login(self.teacher_user)
         response = self.client.post(self.save_url, self._build_payload())
-        self.assertEqual(response.status_code, 403)
+        # 409, not 403: the teacher still holds their role and only the lock
+        # changed under them, so this is a conflict. Nothing is saved (asserted
+        # below, unchanged) but their typing is handed back rather than binned.
+        self.assertEqual(response.status_code, 409)
 
         bullets = SelfReviewBullet.objects.filter(
             self_review_item__self_review=self.self_review
@@ -966,7 +969,8 @@ class LeaderReviewSaveTests(TestCase):
         self.appraisal.save()
         self.client.force_login(self.leader_user)
         response = self.client.post(self.save_url, self._payload(score="3"))
-        self.assertEqual(response.status_code, 403)
+        # Conflict, not denial — see AppraisalLockingTests.
+        self.assertEqual(response.status_code, 409)
         self.assertTrue(all(s.score is None for s in self.leader_review.standards.all()))
 
 
@@ -1510,8 +1514,11 @@ class LastYearGoalReviewTests(TestCase):
         response = self.client.post(
             self.save_url, self._payload(teacher_comment="Too late.")
         )
-        self.assertEqual(response.status_code, 403)
+        # Conflict, not denial — see AppraisalLockingTests. Nothing is written,
+        # but the comment is echoed back so it can be copied out.
+        self.assertEqual(response.status_code, 409)
         self.assertTrue(all(t == "" for t, _ in self._comments()))
+        self.assertContains(response, "Too late.", status_code=409)
 
     # IDOR: the previous appraisal is derived server-side, never taken from the
     # request, so a stranger is stopped at the current appraisal's chokepoint.
@@ -2381,3 +2388,386 @@ class ApplyPlanNoOpTests(TestCase):
         self.assertEqual(record["moved_goals"], 0)
         self.assertEqual(record["moved_appraisals"], 0)
         self.assertFalse(record["target_year_created"])
+
+
+class SignOffConflictHandBackTests(TestCase):
+    """A save refused by the LOCK is a 409 hand-back; refused by ROLE is a 403.
+
+    A coach can sign off while the teacher is still typing. The teacher's POST
+    then fails a gate that passed when the page was loaded, and the old
+    behaviour raised PermissionDenied before anything was re-rendered: an
+    afternoon of writing was discarded behind a page that read as though the
+    teacher had never had access to their own record.
+
+    The fix hands the submitted text back at 409 instead. The risk it creates
+    is that the new branch widens access, so both halves are pinned here: the
+    conflict path is reachable only by someone who still holds a role and is
+    blocked purely by the lock, and everybody else — a stranger, or a
+    role-holder posting into the *other* role's section — still gets a plain
+    403 with none of their text echoed. Nothing is written on either path.
+    """
+
+    CONFLICT_STATUS = 409
+
+    def setUp(self):
+        self.teacher_email = "teacher@oxlip.test"
+        self.coach_email = "coach@oxlip.test"
+        self.stranger_email = "stranger@oxlip.test"
+
+        self.teacher_user = make_user(self.teacher_email)
+        self.coach_user = make_user(self.coach_email)
+        self.stranger_user = make_user(self.stranger_email)
+
+        self.teacher = make_staff(
+            self.teacher_email,
+            performance_manager_email=self.coach_email,
+            staff_type=StaffMember.StaffType.TEACHING,
+        )
+        make_staff(self.coach_email)
+        make_staff(self.stranger_email)
+
+        self.last_year = make_year(2024, is_current=False)
+        self.year = make_year(2025)
+        self.previous = make_appraisal(
+            self.teacher, self.last_year, coach_email=self.coach_email
+        )
+        self.appraisal = make_appraisal(
+            self.teacher, self.year, coach_email=self.coach_email
+        )
+        self.self_review = make_self_review(self.appraisal)
+
+        self.self_review_url = reverse(
+            "appraisals:self_review_save", args=[self.appraisal.pk]
+        )
+        self.goals_url = reverse("appraisals:goals_save", args=[self.appraisal.pk])
+        self.summary_url = reverse("appraisals:summary_save", args=[self.appraisal.pk])
+        self.last_year_url = reverse(
+            "appraisals:last_year_save", args=[self.appraisal.pk]
+        )
+
+    def _sign_off(self):
+        """Simulate the coach signing off after the other party loaded the page."""
+        self.appraisal.status = Appraisal.Status.SIGNED_OFF
+        self.appraisal.save(update_fields=["status"])
+
+    def _self_review_payload(self, evidence):
+        items = list(self.self_review.items.all())
+        bullets = list(
+            SelfReviewBullet.objects.filter(
+                self_review_item__self_review=self.self_review
+            ).order_by("self_review_item__order", "order")
+        )
+        payload = {
+            "job_summary": "",
+            "level_description": "",
+            "upr_declaration_agreed": "",
+            "signed_name": "",
+            "signed_date": "",
+            "items-TOTAL_FORMS": str(len(items)),
+            "items-INITIAL_FORMS": str(len(items)),
+            "items-MIN_NUM_FORMS": "0",
+            "items-MAX_NUM_FORMS": "1000",
+            "bullets-TOTAL_FORMS": str(len(bullets)),
+            "bullets-INITIAL_FORMS": str(len(bullets)),
+            "bullets-MIN_NUM_FORMS": "0",
+            "bullets-MAX_NUM_FORMS": "1000",
+        }
+        for index, item in enumerate(items):
+            payload[f"items-{index}-id"] = str(item.pk)
+            payload[f"items-{index}-evidence"] = evidence
+        for index, bullet in enumerate(bullets):
+            payload[f"bullets-{index}-id"] = str(bullet.pk)
+            payload[f"bullets-{index}-score"] = "3"
+        return payload
+
+    def _goals_payload(self, title):
+        goals = list(self.appraisal.goals.order_by("order"))
+        payload = {
+            "goals-TOTAL_FORMS": str(len(goals)),
+            "goals-INITIAL_FORMS": str(len(goals)),
+            "goals-MIN_NUM_FORMS": "0",
+            "goals-MAX_NUM_FORMS": "1000",
+        }
+        for index, goal in enumerate(goals):
+            payload[f"goals-{index}-id"] = str(goal.pk)
+            payload[f"goals-{index}-title"] = title
+            payload[f"goals-{index}-steps_to_success"] = ""
+            payload[f"goals-{index}-success_criteria"] = ""
+            payload[f"goals-{index}-teacher_review_comment"] = ""
+            payload[f"goals-{index}-coach_review_comment"] = ""
+        return payload
+
+    def _summary_payload(self, coach_comment):
+        return {
+            "cpd_requirements": "",
+            "summary_teacher_comment": "",
+            "summary_coach_comment": coach_comment,
+            "on_upper_pay_range": "false",
+            "self_review_form_completed": "false",
+            "engaged_with_professional_growth": "false",
+            "coach_supports_pay_award": "",
+            "job_description_review_needed": "false",
+            "status": Appraisal.Status.SIGNED_OFF,
+        }
+
+    def _last_year_payload(self, teacher_comment):
+        goals = list(self.previous.goals.order_by("order"))
+        payload = {
+            "lastyear-TOTAL_FORMS": str(len(goals)),
+            "lastyear-INITIAL_FORMS": str(len(goals)),
+            "lastyear-MIN_NUM_FORMS": "0",
+            "lastyear-MAX_NUM_FORMS": "1000",
+        }
+        for index, goal in enumerate(goals):
+            payload[f"lastyear-{index}-id"] = str(goal.pk)
+            payload[f"lastyear-{index}-teacher_review_comment"] = teacher_comment
+            payload[f"lastyear-{index}-coach_review_comment"] = ""
+        return payload
+
+    def _bullet_scores(self):
+        return [
+            b.score
+            for b in SelfReviewBullet.objects.filter(
+                self_review_item__self_review=self.self_review
+            )
+        ]
+
+    # (a) Catches the conflict being reported as a flat permission denial, which
+    # is both untrue and the shape that threw the text away.
+    def test_self_review_save_after_sign_off_returns_409_not_403(self):
+        self._sign_off()
+        self.client.force_login(self.teacher_user)
+
+        response = self.client.post(
+            self.self_review_url, self._self_review_payload("Moderated in November.")
+        )
+
+        self.assertEqual(response.status_code, self.CONFLICT_STATUS)
+
+    # (b) Catches the hand-back page rendering without the user's own words on
+    # it — a 409 that loses the text is no better than the 403 it replaced.
+    def test_self_review_conflict_response_shows_the_submitted_text(self):
+        self._sign_off()
+        self.client.force_login(self.teacher_user)
+
+        response = self.client.post(
+            self.self_review_url,
+            self._self_review_payload("Book scrutiny evidence from the autumn term."),
+        )
+
+        self.assertContains(
+            response,
+            "Book scrutiny evidence from the autumn term.",
+            status_code=self.CONFLICT_STATUS,
+        )
+
+    # (c) Catches the hand-back becoming a write: the record is signed off, so
+    # echoing the text back must not also persist any of it.
+    def test_self_review_conflict_writes_nothing_to_the_database(self):
+        self._sign_off()
+        self.client.force_login(self.teacher_user)
+
+        self.client.post(
+            self.self_review_url, self._self_review_payload("Must not be stored.")
+        )
+
+        self.assertTrue(all(i.evidence == "" for i in self.self_review.items.all()))
+        self.assertTrue(all(score is None for score in self._bullet_scores()))
+
+    # (d) THE ONE THAT MATTERS: the conflict branch must not have widened
+    # access. A stranger has no role at all, so every save endpoint still stops
+    # them at get_appraisal_or_403 with a plain 403 — and, since the hand-back
+    # page is rendered for someone who may have just lost access, nothing they
+    # posted is echoed back to them either.
+    def test_stranger_still_gets_403_from_every_save_endpoint_when_locked(self):
+        self._sign_off()
+        self.client.force_login(self.stranger_user)
+        probe = "Text typed by somebody with no role on this record."
+
+        for url in (
+            self.self_review_url,
+            self.goals_url,
+            self.summary_url,
+            self.last_year_url,
+        ):
+            with self.subTest(url=url):
+                response = self.client.post(url, {"summary_teacher_comment": probe})
+                self.assertEqual(response.status_code, 403)
+                self.assertNotContains(response, probe, status_code=403)
+
+    # ...and the same for a role-holder posting into the OTHER role's section:
+    # the coach never had the teacher's self-review fields, so the lock is not
+    # the reason they are refused and this stays a 403.
+    def test_coach_still_gets_403_from_the_teacher_only_self_review_when_locked(self):
+        self._sign_off()
+        self.client.force_login(self.coach_user)
+
+        response = self.client.post(
+            self.self_review_url, self._self_review_payload("Coach writing here.")
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(all(i.evidence == "" for i in self.self_review.items.all()))
+
+    # Catches the goals endpoint keeping the old discard-behind-403 behaviour.
+    def test_goals_save_after_sign_off_hands_the_text_back_and_saves_nothing(self):
+        self._sign_off()
+        self.client.force_login(self.teacher_user)
+        original = [g.title for g in self.appraisal.goals.order_by("order")]
+
+        response = self.client.post(
+            self.goals_url, self._goals_payload("Rewritten goal title from the teacher.")
+        )
+
+        self.assertContains(
+            response,
+            "Rewritten goal title from the teacher.",
+            status_code=self.CONFLICT_STATUS,
+        )
+        self.assertEqual(
+            [g.title for g in self.appraisal.goals.order_by("order")], original
+        )
+
+    # Catches the summary endpoint keeping it — the coach's own sign-off locks
+    # the record under their next keystroke, so they hit this too.
+    def test_summary_save_after_sign_off_hands_the_text_back_and_saves_nothing(self):
+        self._sign_off()
+        self.client.force_login(self.coach_user)
+
+        response = self.client.post(
+            self.summary_url,
+            self._summary_payload("Final coach comment written after signing off."),
+        )
+
+        self.assertContains(
+            response,
+            "Final coach comment written after signing off.",
+            status_code=self.CONFLICT_STATUS,
+        )
+        self.appraisal.refresh_from_db()
+        self.assertEqual(self.appraisal.summary_coach_comment, "")
+
+    # Catches the last-year endpoint keeping it. Note this tab writes into the
+    # PREVIOUS appraisal's goals, so "saves nothing" is asserted there.
+    def test_last_year_save_after_sign_off_hands_the_text_back_and_saves_nothing(self):
+        self._sign_off()
+        self.client.force_login(self.teacher_user)
+
+        response = self.client.post(
+            self.last_year_url,
+            self._last_year_payload("Reflection on last year written too late."),
+        )
+
+        self.assertContains(
+            response,
+            "Reflection on last year written too late.",
+            status_code=self.CONFLICT_STATUS,
+        )
+        self.assertTrue(
+            all(
+                g.teacher_review_comment == ""
+                for g in self.previous.goals.order_by("order")
+            )
+        )
+
+
+class ValidationErrorVisibilityTests(TestCase):
+    """A rejected save must show WHY on the page it re-renders.
+
+    The original fault: posting a signed_name over its 200-character limit
+    failed the whole self-review save, and the page came back saying "Please
+    correct the errors below." with no error anywhere below it. Because
+    _save_section requires every target form to be valid before saving any of
+    them, a whole self-review's evidence and scores went unsaved with nothing
+    on screen to say what was wrong — so the user's only recourse was to press
+    Save again, and lose it again.
+
+    These assert on the RENDERED RESPONSE, not on form.errors. form.errors was
+    always populated; the bug was that the template never printed it.
+    """
+
+    def setUp(self):
+        self.teacher_email = "teacher@oxlip.test"
+        self.teacher_user = make_user(self.teacher_email)
+        self.teacher = make_staff(
+            self.teacher_email, staff_type=StaffMember.StaffType.TEACHING
+        )
+        self.year = make_year()
+        self.appraisal = make_appraisal(self.teacher, self.year)
+        self.self_review = make_self_review(self.appraisal)
+        self.save_url = reverse("appraisals:self_review_save", args=[self.appraisal.pk])
+        self.client.force_login(self.teacher_user)
+
+    def _payload(self, **overrides):
+        items = list(self.self_review.items.all())
+        bullets = list(
+            SelfReviewBullet.objects.filter(
+                self_review_item__self_review=self.self_review
+            ).order_by("self_review_item__order", "order")
+        )
+        payload = {
+            "job_summary": "",
+            "level_description": "",
+            "upr_declaration_agreed": "",
+            "signed_name": "",
+            "signed_date": "",
+            "items-TOTAL_FORMS": str(len(items)),
+            "items-INITIAL_FORMS": str(len(items)),
+            "items-MIN_NUM_FORMS": "0",
+            "items-MAX_NUM_FORMS": "1000",
+            "bullets-TOTAL_FORMS": str(len(bullets)),
+            "bullets-INITIAL_FORMS": str(len(bullets)),
+            "bullets-MIN_NUM_FORMS": "0",
+            "bullets-MAX_NUM_FORMS": "1000",
+        }
+        for index, item in enumerate(items):
+            payload[f"items-{index}-id"] = str(item.pk)
+            payload[f"items-{index}-evidence"] = "Evidence the user typed."
+        for index, bullet in enumerate(bullets):
+            payload[f"bullets-{index}-id"] = str(bullet.pk)
+            payload[f"bullets-{index}-score"] = "2"
+        payload.update(overrides)
+        return payload
+
+    # Catches the exact reported bug: an invisible signed_name length error.
+    def test_over_long_signed_name_error_is_rendered_on_the_page(self):
+        response = self.client.post(self.save_url, self._payload(signed_name="x" * 201))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "200 characters")
+
+    # Catches the "correct the errors below" banner being shown with nothing
+    # below it — the two must not be able to drift apart again.
+    def test_error_banner_is_never_shown_without_a_visible_error(self):
+        response = self.client.post(self.save_url, self._payload(signed_name="x" * 201))
+
+        self.assertContains(response, "Please correct the errors below.")
+        self.assertContains(response, "form-error-summary")
+
+    # Catches a failure buried inside a formset ROW being invisible — the
+    # formset half of the same fix (core/_formset_errors.html). The summary
+    # block is asserted by name as well as by message, because the score widget
+    # happens to print its own errors inline: without that second assertion the
+    # test would pass with the shared include deleted, which is exactly the
+    # regression it exists to catch on every OTHER field in the formset.
+    def test_formset_row_error_is_rendered_in_the_summary_block(self):
+        response = self.client.post(self.save_url, self._payload(**{"bullets-0-score": "9"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Select a valid choice")
+        self.assertContains(response, "form-error-summary")
+
+    # The reason the error has to be visible: one bad field blocks the whole
+    # tab, so a user with no error on screen loses everything else they typed.
+    def test_a_single_invalid_field_blocks_the_whole_self_review_save(self):
+        self.client.post(self.save_url, self._payload(signed_name="x" * 201))
+
+        self.assertTrue(all(i.evidence == "" for i in self.self_review.items.all()))
+        self.assertTrue(
+            all(
+                b.score is None
+                for b in SelfReviewBullet.objects.filter(
+                    self_review_item__self_review=self.self_review
+                )
+            )
+        )

@@ -134,6 +134,13 @@ class SelfReviewForm(RoleGatedForm):
         widgets = {
             "job_summary": forms.Textarea(attrs={"rows": 4}),
             "level_description": forms.Textarea(attrs={"rows": 4}),
+            # signed_name is a CharField(max_length=200) and was the one field on
+            # this tab that could realistically fail validation — someone pasting
+            # a full job title or an email signature. A failure here blocks the
+            # WHOLE self-review save (_save_section requires every target form to
+            # be valid), so stop it at the browser rather than let it cost the
+            # user their evidence. The server-side limit still applies.
+            "signed_name": forms.TextInput(attrs={"maxlength": 200}),
             "signed_date": forms.DateInput(attrs={"type": "date"}),
         }
 

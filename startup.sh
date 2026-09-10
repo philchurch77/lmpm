@@ -19,18 +19,35 @@ export PYTHONPATH="$APP_ROOT:${PYTHONPATH:-}"
 : "${DJANGO_SETTINGS_MODULE:=lmpm.settings}"
 WSGI_PATH="${WSGI_PATH:-lmpm.wsgi:application}"
 
-# 3) Migrations + seed data + static. Each step is idempotent and tolerant of
-#    failure so a transient error doesn't block the app from booting.
+# 3) Migrations + static. These two MUST succeed: booting without them gives a
+#    running app that silently fails every save.
+#
+#    These used to be `|| echo "... (continuing)"`, which defeated the `set -e`
+#    at the top of this file on purpose. The result was a deploy that went green
+#    in GitHub Actions (which reports on package upload, not on boot) while the
+#    app ran against a stale schema — every write raising UndefinedColumn, users
+#    losing whatever they had typed to a bare 500 page, and one line in a
+#    container log as the only evidence. A container that refuses to start is
+#    visible in Azure within a minute; one serving a broken schema is not.
+#
+#    collectstatic is the more dangerous of the two: DEBUG=0 selects
+#    CompressedManifestStaticFilesStorage and staticfiles/ is gitignored, so a
+#    missing staticfiles.json makes every {% static %} tag raise and takes the
+#    whole site down — while still answering the port, so Azure's warm-up probe
+#    passes and the deploy looks healthy.
 if [ -f "$APP_ROOT/manage.py" ]; then
   echo "Running migrations..."
-  python manage.py migrate --noinput || echo "Migrations failed (continuing)."
+  python manage.py migrate --noinput
 
+  echo "Collecting static..."
+  python manage.py collectstatic --noinput
+
+  # Seeds are genuinely optional — they only top up reference data (schools,
+  # branding) and the app is fully usable without them, so a transient failure
+  # here should not hold up a boot that is otherwise sound.
   echo "Seeding base data..."
   python manage.py seed_schools  || echo "seed_schools failed (continuing)."
   python manage.py seed_branding || echo "seed_branding failed (continuing)."
-
-  echo "Collecting static..."
-  python manage.py collectstatic --noinput || echo "Collectstatic failed (continuing)."
 fi
 
 # 4) Start gunicorn. Production is Postgres, so multiple workers are safe;

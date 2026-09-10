@@ -2332,6 +2332,20 @@ summary:focus-visible {
 .readonly-field p { margin: 0; white-space: pre-wrap; }
 .field-errors { margin-top: 4px; color: var(--rag-red); font-size: 13px; }
 
+/* The per-form error summary at the top of each tab (core/_error_summary.html).
+   Sits above the fields so "Please correct the errors below" always has
+   something legible below it, however the individual field is rendered. */
+.form-error-summary {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--rag-red);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: rgba(200, 30, 30, 0.06);
+}
+.form-error-summary ul { margin: 0; padding-left: 20px; }
+.form-error-summary li { margin: 2px 0; }
+
 /* Yes/No segmented control (reuses the rag-pill interaction pattern) */
 .seg-group {
   display: inline-flex;

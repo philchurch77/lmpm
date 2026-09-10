@@ -72,6 +72,12 @@
     backdrop.querySelector('.unsaved-modal-stay').addEventListener('click', close);
     backdrop.querySelector('.unsaved-modal-discard').addEventListener('click', function () {
       markClean(form);
+      // Actually put the fields back. Previously "Discard changes" only stopped
+      // tracking the form, so the text the user had just chosen to discard was
+      // still sitting visibly in the boxes. Anyone who read that as "discard the
+      // navigation, keep my typing" was reassured by what they saw and then lost
+      // it on the next navigation, with no second warning.
+      if (form.reset) form.reset();
       close();
       if (options.onDiscard) options.onDiscard();
     });
@@ -88,7 +94,22 @@
   document.addEventListener('DOMContentLoaded', function () {
     Array.prototype.forEach.call(
       document.querySelectorAll('form[data-warn-unsaved]'),
-      trackForm
+      function (form) {
+        trackForm(form);
+
+        // A form re-rendered after a failed save is full of the user's own
+        // unsaved text — bound from their POST — but the browser sees it as
+        // server-supplied, so nothing had marked it dirty and navigating away
+        // from the error page threw the work away silently. That is the single
+        // likeliest moment to lose a long piece of writing: the user cannot see
+        // what is wrong, goes looking on another tab, and it is gone.
+        //
+        // Rendered errors are the reliable tell that this is such a re-render,
+        // since they only appear on a bound form that failed validation.
+        if (form.querySelector('.field-errors')) {
+          DIRTY_FORMS.add(form);
+        }
+      }
     );
   });
 

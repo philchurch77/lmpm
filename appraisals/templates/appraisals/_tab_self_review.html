@@ -4,9 +4,14 @@
 <form method="post" action="{% url 'appraisals:self_review_save' pk=appraisal.pk %}" data-warn-unsaved>
   {% csrf_token %}
   {{ self_review_items.management_form }}
-  {{ self_review_items.non_form_errors }}
   {{ self_review_bullets.management_form }}
-  {{ self_review_bullets.non_form_errors }}
+
+  {# Every error on every form in this tab, so "correct the errors below" always
+     has something below it. self_review_form's errors were rendered nowhere at
+     all before this. #}
+  {% include "core/_error_summary.html" with form=self_review_form %}
+  {% include "core/_formset_errors.html" with formset=self_review_items %}
+  {% include "core/_formset_errors.html" with formset=self_review_bullets %}
 
   {% if self_review.kind == 'SUPPORT' %}
     <div class="reflection-card">

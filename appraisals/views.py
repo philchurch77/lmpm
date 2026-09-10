@@ -9,7 +9,9 @@ from __future__ import annotations
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
@@ -28,10 +30,14 @@ from .models import AcademicYear, Appraisal, LeaderReview, SelfReview, SelfRevie
 from .self_review_templates import UPR_DECLARATION_TEXT
 from core.identity import current_staff_member
 
+from core.recovery import render_save_blocked
+
 from .permissions import (
     can_edit_coach_fields,
     can_edit_teacher_fields,
     get_appraisal_or_403,
+    has_coach_role,
+    has_teacher_role,
 )
 
 TABS = ("self-review", "last-year", "goals", "summary")
@@ -41,6 +47,13 @@ def _can_edit_either(appraisal, role):
     return can_edit_teacher_fields(appraisal, role) or can_edit_coach_fields(
         appraisal, role
     )
+
+
+def _has_either_role(appraisal, role):
+    return has_teacher_role(appraisal, role) or has_coach_role(appraisal, role)
+
+
+_can_edit_either.role_only = _has_either_role
 
 
 def _can_edit_last_year(appraisal, role):
@@ -54,6 +67,13 @@ def _can_edit_last_year(appraisal, role):
     request, so there is no new IDOR surface.
     """
     return appraisal.previous() is not None and _can_edit_either(appraisal, role)
+
+
+def _has_last_year_role(appraisal, role):
+    return appraisal.previous() is not None and _has_either_role(appraisal, role)
+
+
+_can_edit_last_year.role_only = _has_last_year_role
 
 
 def _is_leader(staff):
@@ -301,6 +321,34 @@ def _save_section(request, pk, section, can_check, form_keys, success_msg):
     """Shared POST handler: re-auth, gate, validate the section, save or re-render."""
     appraisal, _staff, role = get_appraisal_or_403(request, pk)
     if not can_check(appraisal, role):
+        # Tell "you were never allowed to edit this" apart from "it was signed
+        # off while you were typing". The second is a conflict, not a denial:
+        # the user still holds their role and the only thing that changed is the
+        # lock, so hand their text back instead of discarding it behind a 403.
+        # Re-rendering the bound page would not do it — once locked, every field
+        # is built disabled, and Django reads a disabled field from its initial
+        # rather than the POST, so the user's own words would be replaced by the
+        # stored ones.
+        # Deliberately not getattr(..., None): a gate added later without a
+        # .role_only half would otherwise fail silently back to the old
+        # discard-behind-a-403 behaviour, and no test would catch it. Better to
+        # break loudly in development than to lose someone's writing in
+        # production.
+        role_only = can_check.role_only
+        if appraisal.is_locked and role_only(appraisal, role):
+            return render_save_blocked(
+                request,
+                heading="This was signed off while you were working",
+                explanation=(
+                    "Your changes were not saved, because this goal setting and "
+                    "review was signed off after you opened this page. Signing off "
+                    "makes a record read-only."
+                ),
+                back_url=reverse(
+                    "appraisals:detail_tab", kwargs={"pk": appraisal.pk, "tab": section}
+                ),
+                back_label="Back to the record",
+            )
         raise PermissionDenied("You may not edit this section.")
 
     forms_ctx = _build_section_forms(
@@ -309,10 +357,15 @@ def _save_section(request, pk, section, can_check, form_keys, success_msg):
     keys = form_keys(forms_ctx) if callable(form_keys) else form_keys
     targets = [forms_ctx[key] for key in keys]
     if all(t.is_valid() for t in targets):
-        for t in targets:
-            t.save()
-        if section == "summary":
-            _stamp_signoff(appraisal)
+        # One unit of work. The self-review tab saves three separate formsets
+        # (the review, the evidence, the scores); without this a failure part-way
+        # committed the evidence but not the scores, leaving the user unable to
+        # tell from the page what had actually landed.
+        with transaction.atomic():
+            for t in targets:
+                t.save()
+            if section == "summary":
+                _stamp_signoff(appraisal)
         messages.success(request, success_msg)
         return redirect("appraisals:detail_tab", pk=appraisal.pk, tab=section)
 

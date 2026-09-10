@@ -1,7 +1,7 @@
 <form method="post" action="{% url 'appraisals:goals_save' pk=appraisal.pk %}" data-warn-unsaved>
   {% csrf_token %}
   {{ goal_formset.management_form }}
-  {{ goal_formset.non_form_errors }}
+  {% include "core/_formset_errors.html" with formset=goal_formset %}
 
   {% for gform in goal_formset %}
     <div class="reflection-card">
@@ -18,18 +18,22 @@
         <div class="field-row">
           <label for="{{ gform.steps_to_success.id_for_label }}">Steps to success (3 minimum)</label>
           {{ gform.steps_to_success }}
+          {% if gform.steps_to_success.errors %}<div class="field-errors">{{ gform.steps_to_success.errors }}</div>{% endif %}
         </div>
         <div class="field-row">
           <label for="{{ gform.success_criteria.id_for_label }}">Success criteria</label>
           {{ gform.success_criteria }}
+          {% if gform.success_criteria.errors %}<div class="field-errors">{{ gform.success_criteria.errors }}</div>{% endif %}
         </div>
         <div class="field-row">
           <label for="{{ gform.teacher_review_comment.id_for_label }}">Review — teacher comments</label>
           {{ gform.teacher_review_comment }}
+          {% if gform.teacher_review_comment.errors %}<div class="field-errors">{{ gform.teacher_review_comment.errors }}</div>{% endif %}
         </div>
         <div class="field-row">
           <label for="{{ gform.coach_review_comment.id_for_label }}">Review — coach comments</label>
           {{ gform.coach_review_comment }}
+          {% if gform.coach_review_comment.errors %}<div class="field-errors">{{ gform.coach_review_comment.errors }}</div>{% endif %}
         </div>
       </div>
     </div>
