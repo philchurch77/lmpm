@@ -7,11 +7,11 @@ on the row's template having wired up that particular field.
   {% include "core/_formset_errors.html" with formset=goal_formset %}
 {% endcomment %}
 {% if formset.non_form_errors %}
-  {# Wrapped in .field-errors deliberately: unsaved_changes.js keys its
+  {% comment %} Wrapped in .field-errors deliberately: unsaved_changes.js keys its
      "this page holds unsaved work" detection on that class, and Django emits
      non-form errors as <ul class="errorlist nonform"> — so without this a
      formset-level failure re-rendered the user's text with no dirty marking
-     and no warning when they navigated away. #}
+     and no warning when they navigated away. {% endcomment %}
   <div class="field-errors">{{ formset.non_form_errors }}</div>
 {% endif %}
 {% for form in formset %}

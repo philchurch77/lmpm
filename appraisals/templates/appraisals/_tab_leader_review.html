@@ -1,10 +1,10 @@
 <form method="post" action="{% url 'appraisals:self_review_save' pk=appraisal.pk %}" data-warn-unsaved>
   {% csrf_token %}
   {{ leader_standard_formset.management_form }}
-  {# Every field on this tab happens to print its own errors inline today, so
+  {% comment %} Every field on this tab happens to print its own errors inline today, so
      nothing is currently invisible here — but the guarantee is that an error
      added later cannot silently fail to render, and that has to hold on the
-     senior-leader tab too, not just the other four. #}
+     senior-leader tab too, not just the other four. {% endcomment %}
   {% include "core/_formset_errors.html" with formset=leader_standard_formset %}
 
   {# Section 1: Ethics and Professional Conduct — three scored sub-sections. #}

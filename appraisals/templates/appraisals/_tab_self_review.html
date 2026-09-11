@@ -6,9 +6,9 @@
   {{ self_review_items.management_form }}
   {{ self_review_bullets.management_form }}
 
-  {# Every error on every form in this tab, so "correct the errors below" always
+  {% comment %} Every error on every form in this tab, so "correct the errors below" always
      has something below it. self_review_form's errors were rendered nowhere at
-     all before this. #}
+     all before this. {% endcomment %}
   {% include "core/_error_summary.html" with form=self_review_form %}
   {% include "core/_formset_errors.html" with formset=self_review_items %}
   {% include "core/_formset_errors.html" with formset=self_review_bullets %}

@@ -14,6 +14,7 @@ Two layers enforce that and both are pinned here:
 from __future__ import annotations
 
 import io
+import re
 from types import SimpleNamespace
 from unittest import mock
 
@@ -25,7 +26,7 @@ from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.exceptions import PermissionDenied
 from django.core.management import call_command
 from django.http import QueryDict
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 
 from allauth.core.exceptions import ImmediateHttpResponse
@@ -1428,3 +1429,58 @@ class FormsetErrorMarkupTests(TestCase):
         # Critical: a clean page must NOT contain the marker, or every ordinary
         # page load would be treated as holding unsaved work and warn on exit.
         self.assertNotIn("field-errors", html)
+
+
+class TemplateCommentSyntaxTests(SimpleTestCase):
+    """``{# ... #}`` is single-line only; spanning it leaks onto the page.
+
+    Django's short comment syntax is not recognised across a newline, so a
+    multi-line ``{# ... #}`` is emitted verbatim as page text. Six of them
+    shipped in one commit and staff saw developer commentary above their
+    goals, read it as an error message, and stopped trusting that their
+    edits were saving. Nothing was broken and nothing was lost — which is
+    exactly why no existing test caught it: the pages rendered, the saves
+    worked, and the suite was green.
+
+    This is a static scan rather than a rendered-page assertion because the
+    fault is template-syntax-wide: a leak in a line-management or import
+    template would be just as visible and no appraisal fixture would reach
+    it. Long comments belong in ``{% comment %} ... {% endcomment %}``.
+    """
+
+    TEMPLATE_ROOTS = (
+        "appraisals",
+        "core",
+        "data_import",
+        "line_management",
+        "overview",
+        "team",
+        "templates",
+    )
+
+    def test_no_multiline_short_comments_in_any_template(self):
+        from django.conf import settings
+
+        offenders = []
+        for root in self.TEMPLATE_ROOTS:
+            for path in (settings.BASE_DIR / root).rglob("*.html"):
+                text = path.read_text(encoding="utf-8")
+                for match in re.finditer(r"\{#", text):
+                    line_start = text.rfind("\n", 0, match.start()) + 1
+                    line_end = text.find("\n", match.start())
+                    if line_end == -1:
+                        line_end = len(text)
+                    rest_of_line = text[match.start() : line_end]
+                    if "#}" not in rest_of_line:
+                        line_no = text.count("\n", 0, match.start()) + 1
+                        offenders.append(
+                            f"{path.relative_to(settings.BASE_DIR)}:{line_no}"
+                        )
+
+        self.assertEqual(
+            offenders,
+            [],
+            "Multi-line {# #} comments render as visible page text. "
+            "Use {% comment %}...{% endcomment %} instead. Found at: "
+            + ", ".join(offenders),
+        )

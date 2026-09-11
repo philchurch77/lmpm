@@ -1,9 +1,9 @@
 {% extends "core/base.html" %}
 
-{# Django's built-in 403 is a bare unstyled page with no navigation, which left
+{% comment %} Django's built-in 403 is a bare unstyled page with no navigation, which left
    an administrator who hit a permission check with no way back. This keeps the
    app shell (and so the sidebar) and shows the PermissionDenied message when
-   the raising code supplied one. #}
+   the raising code supplied one. {% endcomment %}
 
 {% block title %}Not allowed · Line &amp; Performance Management{% endblock %}
 
