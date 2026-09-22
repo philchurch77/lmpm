@@ -254,6 +254,10 @@ def _build_section_forms(appraisal, role, *, section=None, data=None):
             appraisal, owner, can_teacher, bound
         )
 
+    # Support wording on the Goals / Last Year tabs — from the owner, for the
+    # same reason as the self-review variant above.
+    is_support = appraisal.owner_is_support
+
     # Last year's goals are reviewed from this year's page, so the formset is
     # bound to the previous appraisal but gated by the current one's role/lock.
     previous = appraisal.previous()
@@ -262,7 +266,11 @@ def _build_section_forms(appraisal, role, *, section=None, data=None):
             bound("last-year"),
             instance=previous,
             prefix="lastyear",
-            form_kwargs={"can_teacher": can_teacher, "can_coach": can_coach},
+            form_kwargs={
+                "can_teacher": can_teacher,
+                "can_coach": can_coach,
+                "is_support": is_support,
+            },
         )
         if previous is not None
         else None
@@ -275,7 +283,11 @@ def _build_section_forms(appraisal, role, *, section=None, data=None):
         "goal_formset": GoalFormSet(
             bound("goals"),
             instance=appraisal,
-            form_kwargs={"can_teacher": can_teacher, "can_coach": can_coach},
+            form_kwargs={
+                "can_teacher": can_teacher,
+                "can_coach": can_coach,
+                "is_support": is_support,
+            },
         ),
         "summary_form": AppraisalSummaryForm(
             bound("summary"),

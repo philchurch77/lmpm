@@ -16,6 +16,23 @@ DEFAULT_STANDARDS_GOAL = (
     "policies and practices, related to these standards, are adhered to."
 )
 
+# Goal 1 wording for support staff, who have no teacher standards. Agreed with
+# the client. Every support appraisal seeded from here on stores this text, so
+# changing it later only affects new appraisals (reword_support_standards_goal
+# only ever rewrites FROM the teacher default).
+SUPPORT_STANDARDS_GOAL = (
+    "To ensure the requirements of the job description are fully met and that "
+    "school-specific policies and practices, related to this role, are adhered to."
+)
+
+# Support staff are not on the teachers' Upper Pay Range, so Goal 3's
+# "Leadership / UPR" header is reworded for them, in the client's wording (display only — the stored
+# goal_type and its choices are unchanged, and the row itself is kept). Keyed by
+# the Goal.GoalType value.
+SUPPORT_GOAL_TYPE_LABELS = {
+    "LEADERSHIP": "Leadership / Senior Support Staff",
+}
+
 
 class AcademicYear(models.Model):
     """An academic year, used to split current vs previous appraisals.
@@ -147,6 +164,16 @@ class Appraisal(models.Model):
         super().save(*args, **kwargs)
 
     @property
+    def owner_is_support(self) -> bool:
+        """Whether this appraisal's OWNER is support staff.
+
+        Selects the support wording on the Goals / Last Year / Summary tabs.
+        Always the owner (``teacher``), never whoever is viewing. Leaders and
+        unclassified staff get the teacher version, as they always have.
+        """
+        return self.teacher.staff_type == StaffMember.StaffType.SUPPORT
+
+    @property
     def is_locked(self) -> bool:
         """Once signed off, the appraisal is read-only."""
         return self.status == self.Status.SIGNED_OFF
@@ -168,8 +195,9 @@ class Appraisal(models.Model):
     def seed_goals(self):
         """Create the standard set of goal rows for this appraisal.
 
-        Goal 1 (Standards) is prefilled with the default wording; Goals 2 and 3
-        are blank for the teacher to complete. Goal 3 (Leadership/UPR) applies
+        Goal 1 (Standards) is prefilled with the default wording — the support
+        wording when the owner is support staff; Goals 2 and 3 are blank for the
+        teacher to complete. Goal 3 (Leadership/UPR) applies
         only to leaders/UPR staff and may be left blank otherwise. No-op if
         goals already exist. Called from the create view, not from save().
         """
@@ -181,7 +209,11 @@ class Appraisal(models.Model):
                     appraisal=self,
                     goal_type=Goal.GoalType.STANDARDS,
                     order=1,
-                    title=DEFAULT_STANDARDS_GOAL,
+                    title=(
+                        SUPPORT_STANDARDS_GOAL
+                        if self.owner_is_support
+                        else DEFAULT_STANDARDS_GOAL
+                    ),
                 ),
                 Goal(appraisal=self, goal_type=Goal.GoalType.PERSONAL, order=2),
                 Goal(appraisal=self, goal_type=Goal.GoalType.LEADERSHIP, order=3),

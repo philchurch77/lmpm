@@ -42,6 +42,8 @@ venv interpreter directly if so).
 .venv/Scripts/python.exe manage.py move_prior_year_goal_reviews --backup-file <path outside the repo>  # run it; --backup-file is REQUIRED and refused inside BASE_DIR
 .venv/Scripts/python.exe manage.py purge_misseeded_self_reviews          # report self-reviews seeded against the wrong staff type (see "Owner vs viewer")
 .venv/Scripts/python.exe manage.py purge_misseeded_self_reviews --delete  # remove the provably-blank ones; reviews with content are always kept
+.venv/Scripts/python.exe manage.py reword_support_standards_goal          # report support-staff Goal 1s still holding the teacher wording (see "Support-staff wording")
+.venv/Scripts/python.exe manage.py reword_support_standards_goal --apply --backup-file <path outside the repo>  # rewrite only untouched, unsigned, current-year ones; --backup-file REQUIRED (pks, for undo)
 
 # Tests (Django test runner; every app has a suite — core covers the SSO auth gate + readiness command)
 .venv/Scripts/python.exe manage.py test                # all tests
@@ -325,6 +327,29 @@ signs off.
 - **Nav**: `appraisals/context_processors.py` exposes `user_is_coach` so `core/.../base.html` shows
   "My Team" (now the combined `team:my_team` page — see "Team app" below) for coaches **or** line
   managers. Mounted at `/appraisals/`.
+
+### Support-staff wording (Goals / Last Year / Summary tabs)
+The self-review tab varies by `SelfReview.kind`; the other three tabs vary by
+**`Appraisal.owner_is_support`** — the owner's *current* `staff_type`, never the viewer's. It is read
+once in `_build_section_forms` and passed to the goal forms as `is_support` via `form_kwargs`. For a support owner: Goal 1 is seeded with `SUPPORT_STANDARDS_GOAL`
+instead of the teacher-standards wording (agreed with the client), Goal 3's
+header reads "Leadership / Senior Support Staff" from `SUPPORT_GOAL_TYPE_LABELS` via the goal form's `type_label` (display only — `GoalType` choices
+are unchanged), and the Upper Pay Range question is dropped. Leaders and unclassified staff keep the
+teacher version. "Teacher comments" labels read "Member of staff comments" for everyone.
+- **The UPR question is removed from the form, not hidden in the template** — a bound yes/no field
+  with no rendered input coerces to False and would overwrite a stored "Yes". And it is removed
+  **only while unset**: a support appraisal already holding "Yes" keeps the question on screen, so no
+  stored answer becomes invisible. The template gates on `summary_form.shows_upper_pay_range`.
+- Existing support appraisals carry the old wording in the stored `Goal.title`.
+  `reword_support_standards_goal` rewrites a Goal 1 title only when it is still *exactly*
+  `DEFAULT_STANDARDS_GOAL`, the appraisal is in the **current** year and not signed off, the owner is
+  SUPPORT, and nobody has worked against the goal (steps, criteria and both review comments blank).
+  An earlier year's goal is history — its review comments were written against the old wording.
+  Compare-and-swap `.update()`; `--apply` requires `--backup-file` outside `BASE_DIR`, written before
+  the change.
+- Known and accepted: a stored "No" on a support appraisal is not shown in the app (it is
+  indistinguishable from never answered), and once a coach changes a support "Yes" to "No" the
+  question disappears. Both values stay in the database and the admin.
 
 ### Operational prerequisites
 Before anyone can start an appraisal: an `AcademicYear` must be marked `is_current`, the person needs

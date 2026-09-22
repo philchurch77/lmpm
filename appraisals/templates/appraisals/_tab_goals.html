@@ -6,7 +6,7 @@
   {% for gform in goal_formset %}
     <div class="reflection-card">
       <div class="reflection-card-header">
-        Goal {{ gform.instance.order }} — {{ gform.instance.get_goal_type_display }}
+        Goal {{ gform.instance.order }} — {{ gform.type_label }}
       </div>
       <div class="reflection-card-body">
         {{ gform.id }}
@@ -26,7 +26,7 @@
           {% if gform.success_criteria.errors %}<div class="field-errors">{{ gform.success_criteria.errors }}</div>{% endif %}
         </div>
         <div class="field-row">
-          <label for="{{ gform.teacher_review_comment.id_for_label }}">Review — teacher comments</label>
+          <label for="{{ gform.teacher_review_comment.id_for_label }}">Review — member of staff comments</label>
           {{ gform.teacher_review_comment }}
           {% if gform.teacher_review_comment.errors %}<div class="field-errors">{{ gform.teacher_review_comment.errors }}</div>{% endif %}
         </div>

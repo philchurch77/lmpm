@@ -13,7 +13,7 @@
         {{ summary_form.cpd_requirements }}
       </div>
       <div class="field-row">
-        <label for="{{ summary_form.summary_teacher_comment.id_for_label }}">Teacher comments</label>
+        <label for="{{ summary_form.summary_teacher_comment.id_for_label }}">Member of staff comments</label>
         {{ summary_form.summary_teacher_comment }}
       </div>
       <div class="field-row">
@@ -26,10 +26,15 @@
   <div class="reflection-card">
     <div class="reflection-card-header">Checks</div>
     <div class="reflection-card-body">
-      <div class="field-row">
-        <span class="field-label">Is this teacher applying to be or is paid on the Upper Pay Range?</span>
-        {% include "appraisals/_widgets/yesno.html" with field=summary_form.on_upper_pay_range %}
-      </div>
+      {% comment %} The form drops this question for support staff only while it is unset,
+         so a stored "Yes" is never hidden. Gate on the form, not on the owner's type. {% endcomment %}
+      {% if summary_form.shows_upper_pay_range %}
+        <div class="field-row">
+          <span class="field-label">Is this member of staff applying to be or is paid on the Upper Pay Range?</span>
+          {% include "appraisals/_widgets/yesno.html" with field=summary_form.on_upper_pay_range %}
+          {% if appraisal.owner_is_support %}<p class="descriptor-text muted">This answer was recorded before the question was removed for support staff. The coach can change it to No if it does not apply.</p>{% endif %}
+        </div>
+      {% endif %}
       <div class="field-row">
         <span class="field-label">Has the appropriate Self-review Form been completed?</span>
         {% include "appraisals/_widgets/yesno.html" with field=summary_form.self_review_form_completed %}

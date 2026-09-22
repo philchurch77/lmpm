@@ -13,6 +13,7 @@ from __future__ import annotations
 from django import forms
 
 from .models import (
+    SUPPORT_GOAL_TYPE_LABELS,
     Appraisal,
     Goal,
     LeaderReview,
@@ -145,7 +146,23 @@ class SelfReviewForm(RoleGatedForm):
         }
 
 
-class GoalForm(RoleGatedForm):
+class GoalTypeLabelMixin:
+    """Sets ``type_label``: the goal's type header, worded for the appraisal owner.
+
+    ``is_support`` is decided once, from the owner, in ``_build_section_forms``
+    and passed down through ``form_kwargs`` — so a goal row never walks back up
+    to its appraisal's owner itself.
+    """
+
+    def __init__(self, *args, is_support=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        label = self.instance.get_goal_type_display()
+        if is_support:
+            label = SUPPORT_GOAL_TYPE_LABELS.get(self.instance.goal_type, label)
+        self.type_label = label
+
+
+class GoalForm(GoalTypeLabelMixin, RoleGatedForm):
     teacher_fields = (
         "title",
         "steps_to_success",
@@ -172,7 +189,7 @@ class GoalForm(RoleGatedForm):
         }
 
 
-class LastYearGoalForm(RoleGatedForm):
+class LastYearGoalForm(GoalTypeLabelMixin, RoleGatedForm):
     """Review comments only, for a goal set in the *previous* academic year.
 
     The same `Goal` row carries a goal's setup and its end-of-cycle review, so
@@ -244,6 +261,26 @@ class AppraisalSummaryForm(RoleGatedForm):
             self.fields["coach_supports_pay_award"].choices = [
                 ("", "Select response")
             ] + list(Appraisal.PayAward.choices)
+        # The Upper Pay Range is a teachers' pay scale, so support staff are not
+        # asked it. The field is REMOVED from the form, not just left off the
+        # page: a yes/no field that is still bound but not rendered submits no
+        # key, coerces to False, and the next coach save would silently turn a
+        # stored "Yes" into "No". Once removed, construct_instance skips it and
+        # the stored value is untouched (a forged key is ignored too).
+        # Only removed while it is unset: a support appraisal that already
+        # holds "Yes" keeps the question on screen, so no stored answer is
+        # ever hidden from the people who can see this record.
+        if (
+            self.instance.pk
+            and self.instance.owner_is_support
+            and not self.instance.on_upper_pay_range
+        ):
+            del self.fields["on_upper_pay_range"]
+
+    @property
+    def shows_upper_pay_range(self) -> bool:
+        """Whether the Upper Pay Range question is part of this form."""
+        return "on_upper_pay_range" in self.fields
 
 
 # Formsets over the pre-seeded child rows (no add/delete in the UI).

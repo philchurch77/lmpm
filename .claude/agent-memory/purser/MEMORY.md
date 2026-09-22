@@ -1,0 +1,1 @@
+- [Appraisals data map](project_appraisals_data_map.md) — free-text/bounded fields, cascades (PROTECT from staff), yes/no clobber rule, Goal 1 reword command scope

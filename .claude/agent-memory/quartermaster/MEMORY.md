@@ -1,0 +1,1 @@
+- [Support-staff Goals/Summary variant](project_support_staff_variant.md) — owner_is_support flag, UPR field removed not hidden, Goal 1 reword via command not migration

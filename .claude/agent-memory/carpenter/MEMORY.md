@@ -1,0 +1,2 @@
+- [Owner-vs-viewer pattern & Goal.type_label N+1 watch point](pattern_appraisals_owner_vs_viewer.md) — appraisals app's owner-driven display pattern; per-row FK walk in formsets is an N+1 risk
+- [One-off data-correction command house style](pattern_oneoff_data_correction_commands.md) — report-by-default/--apply/compare-and-swap convention; placeholder wording risk to recheck later

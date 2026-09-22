@@ -1,0 +1,1 @@
+- [Appraisal enforcement](project_appraisal_enforcement.md) — get_appraisal_or_403 chokepoint, RoleGatedForm disabling, owner-not-viewer variant rule, audited-clean items
