@@ -4,7 +4,7 @@
 
 {% block content %}
   <header class="page-header">
-    <h1 class="page-title">{% if is_new %}New line meeting{% else %}Line meeting{% endif %}</h1>
+    <h1 class="page-title">{% if is_new %}New line meeting{% else %}Line meeting {% include "line_management/_state_badge.html" %}{% endif %}</h1>
     <p class="appraisal-sub">
       {{ member.email }}
       {% if not is_new %} · {{ meeting.meeting_date|date:"j M Y" }}{% if meeting.created_by_email %} · Recorded by {{ meeting.created_by_email }}{% endif %}{% endif %}
@@ -13,7 +13,7 @@
   </header>
 
   {% if not can_edit %}
-    <ul class="messages"><li class="info">This record is read-only. Only the current line manager can edit it.</li></ul>
+    <ul class="messages"><li class="info">{% if meeting and not meeting.is_held %}Your line manager is still preparing this meeting, so it may be incomplete. {% endif %}This record is read-only. Only the current line manager can edit it.</li></ul>
   {% endif %}
 
   <form method="post" action="{{ form_action }}" data-warn-unsaved>
@@ -66,7 +66,19 @@
     {% include "line_management/_agreed_actions.html" %}
 
     {% if can_edit %}
-      <div class="actions"><button type="submit">Save meeting</button></div>
+      {% comment %}
+        "Save" comes first in the DOM so that pressing Enter in a field submits it,
+        never the hold: marking a meeting held cannot be undone.
+      {% endcomment %}
+      {% if can_hold %}
+        <div class="actions">
+          <button type="submit">Save</button>
+          <button type="submit" name="hold" value="1" class="btn-secondary" aria-describedby="hold-hint">Save and mark as held</button>
+        </div>
+        <p class="muted hold-hint" id="hold-hint">Mark the meeting as held once it has taken place. You can still edit the notes afterwards, but it can’t go back to being prepared.</p>
+      {% else %}
+        <div class="actions"><button type="submit">Save</button></div>
+      {% endif %}
     {% endif %}
   </form>
 {% endblock %}

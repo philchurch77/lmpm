@@ -170,7 +170,7 @@ class LineManagementOverviewViewTests(TestCase):
         engaged = StaffMember.objects.create(
             email="active@oxlip.test", line_manager_email="boss@oxlip.test"
         )
-        LineMeeting.objects.create(staff=engaged, meeting_date=date(2026, 2, 1))
+        LineMeeting.objects.create(staff=engaged, meeting_date=date(2026, 2, 1), state=LineMeeting.State.HELD)
         response = self.client.get(self.url)
         counts = response.context["counts"]
         self.assertEqual(response.context["total"], 3)
@@ -181,3 +181,28 @@ class LineManagementOverviewViewTests(TestCase):
         by_email = {r["member"].email: r for r in response.context["rows"]}
         self.assertEqual(by_email["active@oxlip.test"]["meeting_count"], 1)
         self.assertEqual(by_email["lonely@oxlip.test"]["meeting_count"], 0)
+
+    # Catches the dashboard counting a meeting still being prepared as one that took place.
+    def test_overview_counts_only_held_meetings(self):
+        held_and_preparing = StaffMember.objects.create(
+            email="both@oxlip.test", line_manager_email="boss@oxlip.test"
+        )
+        LineMeeting.objects.create(
+            staff=held_and_preparing, meeting_date=date(2026, 1, 10), state=LineMeeting.State.HELD
+        )
+        LineMeeting.objects.create(
+            staff=held_and_preparing, meeting_date=date(2026, 3, 1), state=LineMeeting.State.PREPARING
+        )
+        only_preparing = StaffMember.objects.create(
+            email="started@oxlip.test", line_manager_email="boss@oxlip.test"
+        )
+        LineMeeting.objects.create(
+            staff=only_preparing, meeting_date=date(2026, 3, 1), state=LineMeeting.State.PREPARING
+        )
+        response = self.client.get(self.url)
+        by_email = {r["member"].email: r for r in response.context["rows"]}
+        self.assertEqual(by_email["both@oxlip.test"]["meeting_count"], 1)
+        self.assertEqual(by_email["both@oxlip.test"]["last_meeting"], date(2026, 1, 10))
+        self.assertEqual(by_email["started@oxlip.test"]["meeting_count"], 0)
+        self.assertEqual(response.context["counts"]["has_meetings"], 1)
+        self.assertEqual(response.context["counts"]["no_meetings"], 1)

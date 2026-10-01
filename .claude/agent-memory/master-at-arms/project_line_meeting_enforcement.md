@@ -22,3 +22,12 @@ Leg 2 stale-save refusal (audited 2026-09-30, uncommitted at the time):
 - Version token = `LineMeeting.updated_at` UTC isoformat in a POST hidden field only; `meeting_version` is in `core.recovery._SKIP_EXACT`. Malformed/naive/extreme tokens -> 409, never a save or 500. No app-level logging in line_management.
 - Writers that must bump the meeting version: `services.save_meeting_page` (CAS), `start_meeting` (touch source), admin inline/standalone action save+delete (`touch_meetings`), `data_import.apply_line_meeting_row` update. A new `.update()` on LineMeeting/MeetingAction that skips this is a Purser matter, not an access one.
 - Probe script pattern: run via `manage.py shell -c "exec(open(path).read())"` (piping into shell breaks multi-line blocks).
+
+Leg 3 Held/Preparing state (audited 2026-10-01, uncommitted at the time):
+- `LineMeeting.state` (PREPARING/HELD) is on NO form (`LineMeetingForm` fields = date + 3 notes); only writers are `services.save_meeting_page(hold=True)` (inside the version CAS), `meeting_create` (constructor), importer create (HELD), admin add (readonly on change). Re-check no form ever gains `state`.
+- `meeting_save`: 403 (`can_edit_meeting`) precedes `hold`; `hold` = posted key AND `can_hold_meeting(role)` AND not held. `can_hold_meeting` is deliberately separate from `can_edit_meeting` for leg 4 (report edits, never holds) — when leg 4 widens can_edit, re-probe that a report's `hold=1` is ignored, not honoured.
+- `meeting_create` `refuse_preparing` 409 uses `_handback_labels(post, None)` (positional labels, reads nothing). `meeting_new` redirect sits after `get_managed_staff_or_403`.
+- Importer skip messages `EDITED_IN_APP` / `STRANDS_ACTIONS` are module constants; no record text reaches `ImportRow.error_message`.
+- Dashboards: `services.held_meeting_summary()` changes annotations only; row scoping still `line_managed_staff` (team) / `_require_superuser` (overview).
+- Probed with an inline `manage.py shell -c "$PROBE"` (heredoc into a shell var, create_test_db/destroy_test_db) — no file written. Report/stranger hold -> 403; crafted `state=PREPARING` on a Held meeting -> ignored.
+- Leg-3 access tests were not yet in the suite at audit time (hold role gate, un-hold, refuse_preparing no-leak); check whether added.

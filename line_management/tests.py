@@ -47,11 +47,14 @@ def make_staff(email, *, line_manager_email=""):
     )
 
 
-def make_meeting(staff, *, created_by_email="", meeting_date=None):
+def make_meeting(staff, *, created_by_email="", meeting_date=None, state=LineMeeting.State.HELD):
+    # Held by default: most tests are about meetings that have taken place, and
+    # a staff member may have only one meeting being prepared.
     return LineMeeting.objects.create(
         staff=staff,
         created_by_email=created_by_email,
         meeting_date=meeting_date or date(2026, 1, 15),
+        state=state,
     )
 
 
@@ -567,7 +570,8 @@ class DoubleSubmitGuardTests(TestCase):
     # on the same day are legitimate, and the second must not be swallowed just
     # because the date matches.
     def test_same_staff_and_date_with_different_notes_creates_a_second_meeting(self):
-        self._post(main_matters="Morning catch-up about cover.")
+        # The first is held, so the second may be started (one being prepared at a time).
+        self._post(main_matters="Morning catch-up about cover.", hold="1")
         self._post(main_matters="Afternoon follow-up about the trip.")
 
         meetings = LineMeeting.objects.filter(staff=self.report)
@@ -583,7 +587,7 @@ class DoubleSubmitGuardTests(TestCase):
     # Catches the guard matching on only some of the note fields: a repeat that
     # differs in ONE section is a different meeting and must still be created.
     def test_difference_in_any_single_note_field_creates_a_second_meeting(self):
-        self._post(upcoming="")
+        self._post(upcoming="", hold="1")
         self._post(upcoming="Book the room for next time.")
 
         self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 2)
@@ -969,10 +973,13 @@ class _ManagerCreateMixin:
         self.create_url = reverse("line_management:meeting_create", args=[self.report.pk])
         self.client.force_login(self.manager_user)
 
-    def create(self, meeting_date="2026-02-01", carried=(), agreed=(), **notes):
+    def create(self, meeting_date="2026-02-01", carried=(), agreed=(), hold=False, **notes):
+        """POST the create page. ``hold`` presses "Save and mark as held" instead of "Save"."""
         payload = meeting_payload(meeting_date=meeting_date, **notes)
         payload.update(carried_rows(carried))
         payload.update(agreed_rows(new=agreed))
+        if hold:
+            payload["hold"] = "1"
         return self.client.post(self.create_url, payload)
 
     def newest(self):
@@ -996,7 +1003,9 @@ class CarryForwardTests(_ManagerCreateMixin, TestCase):
     def test_already_reviewed_action_is_not_repinned(self):
         prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
         a = make_action(prev, "A")
-        self.assertEqual(self.create("2026-02-01", carried=[(a, "GREEN", "Done")], agreed=["B"]).status_code, 302)
+        self.assertEqual(
+            self.create("2026-02-01", carried=[(a, "GREEN", "Done")], agreed=["B"], hold=True).status_code, 302
+        )
         second = self.newest()
         b = MeetingAction.objects.get(description="B")
 
@@ -1041,7 +1050,8 @@ class CarryForwardTests(_ManagerCreateMixin, TestCase):
     def test_back_dated_meeting_pins_nothing(self):
         prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
         a = make_action(prev, "A")
-        response = self.create("2026-01-01", carried=[(a, "", "")], main_matters="Back-dated notes")
+        # Back-dated, it can only be recorded as already held (leg 3).
+        response = self.create("2026-01-01", carried=[(a, "", "")], main_matters="Back-dated notes", hold=True)
         self.assertEqual(response.status_code, 302)
         a.refresh_from_db()
         self.assertIsNone(a.reviewed_in_id)
@@ -1092,7 +1102,8 @@ class StaleCarryForwardTests(_ManagerCreateMixin, TestCase):
 
         # Meanwhile, another meeting is created and pins the action.
         self.assertEqual(
-            self.create("2026-02-01", carried=[(a, "", "")], main_matters="Other tab").status_code, 302
+            self.create("2026-02-01", carried=[(a, "", "")], main_matters="Other tab", hold=True).status_code,
+            302,
         )
         count = LineMeeting.objects.filter(staff=self.report).count()
 
@@ -1178,7 +1189,7 @@ class CreateWithActionsTests(_ManagerCreateMixin, TestCase):
 
     # Catches two genuine actions-only meetings on one day being folded into one, losing the second.
     def test_two_actions_only_meetings_on_same_day_are_not_folded(self):
-        self.assertEqual(self.create("2026-02-01", agreed=["Call parent"]).status_code, 302)
+        self.assertEqual(self.create("2026-02-01", agreed=["Call parent"], hold=True).status_code, 302)
         call = MeetingAction.objects.get(description="Call parent")
         self.assertEqual(
             self.create("2026-02-01", carried=[(call, "", "")], agreed=["Book room"]).status_code, 302
@@ -1287,7 +1298,7 @@ class ActionLossTests(TestCase):
         comment = "Done ✅ “mostly”\r\n\r\nSee note — naïve"
         create_url = reverse("line_management:meeting_create", args=[self.report.pk])
 
-        payload = meeting_payload(meeting_date="2026-01-12", main_matters="Second")
+        payload = meeting_payload(meeting_date="2026-01-12", main_matters="Second", hold="1")
         payload.update(agreed_rows(new=[text]))
         self.assertEqual(self.client.post(create_url, payload).status_code, 302)
         action = MeetingAction.objects.get(agreed_at__staff=self.report)
@@ -1498,7 +1509,7 @@ class BackDatedAndStaleSaveTests(_ManagerCreateMixin, TestCase):
     def test_back_dated_notes_only_create_saves_and_says_actions_not_reviewed(self):
         prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
         a = make_action(prev, "A")
-        payload = meeting_payload(meeting_date="2026-01-01", main_matters="Catch-up notes")
+        payload = meeting_payload(meeting_date="2026-01-01", main_matters="Catch-up notes", hold="1")
         payload.update(carried_rows([(a, "", "")]))
         response = self.client.post(self.create_url, payload, follow=True)
         self.assertEqual(response.redirect_chain[-1][1], 302)
@@ -1526,7 +1537,8 @@ class BackDatedAndStaleSaveTests(_ManagerCreateMixin, TestCase):
         prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
         a = make_action(prev, "Chase the supplier")
         self.assertEqual(
-            self.create("2026-02-01", carried=[(a, "", "")], main_matters="Other tab").status_code, 302
+            self.create("2026-02-01", carried=[(a, "", "")], main_matters="Other tab", hold=True).status_code,
+            302,
         )
         response = self.create("2026-02-02", carried=[(a, "RED", "Never replied")], main_matters="Stale")
         self.assertEqual(response.status_code, 200)
@@ -2289,3 +2301,424 @@ class PreDeployCreateLabelTests(TestCase):
         for label in ("Main matters to discuss", "Actions from the last meeting", "Actions from this meeting"):
             self.assertContains(response, label, status_code=409)
         self.assertNotContains(response, "Actions from last meeting<", status_code=409)
+
+
+# ---------------------------------------------------------------------------
+# Leg 3 of docs/chart/line-meeting-preparation.md: a meeting is started Being
+# prepared and marked Held; carry-forward reads Held meetings only.
+# ---------------------------------------------------------------------------
+
+from django.db import connection  # noqa: E402
+from django.db.migrations.executor import MigrationExecutor  # noqa: E402
+from django.test import TransactionTestCase  # noqa: E402
+
+from .services import carried_forward_candidates, carry_forward_source  # noqa: E402
+
+PREPARING = LineMeeting.State.PREPARING
+HELD = LineMeeting.State.HELD
+
+
+def state_of(meeting):
+    return LineMeeting.objects.values_list("state", flat=True).get(pk=meeting.pk)
+
+
+def notes_of(meeting):
+    return LineMeeting.objects.values_list("main_matters", flat=True).get(pk=meeting.pk)
+
+
+class _Leg3Mixin(_ManagerCreateMixin):
+    """A manager, a report (with a login) and a stranger; helpers for the meeting page."""
+
+    def setUp(self):
+        super().setUp()
+        self.report_user = User.objects.get(email="report@oxlip.test")
+        self.stranger_user = make_user("stranger@oxlip.test")
+        make_staff("stranger@oxlip.test")
+        self.super_user = make_user("root@oxlip.test", is_superuser=True)
+
+    def preparing(self, notes="Prepared so far", meeting_date=date(2026, 2, 1)):
+        meeting = make_meeting(
+            self.report, state=PREPARING, meeting_date=meeting_date, created_by_email=self.manager_email
+        )
+        LineMeeting.objects.filter(pk=meeting.pk).update(main_matters=notes)
+        return meeting
+
+    def save_url(self, meeting):
+        return reverse("line_management:meeting_save", args=[meeting.pk])
+
+    def page(self, meeting, *, stamp="current", meeting_date="2026-02-01", hold=False,
+             existing=(), new=(), carried=(), **notes):
+        """What a meeting page posts. ``stamp="current"`` sends the live version."""
+        payload = meeting_payload(meeting_date=meeting_date, **notes)
+        payload.update(agreed_rows(existing=existing, new=new))
+        payload.update(carried_rows(carried))
+        if hold:
+            payload["hold"] = "1"
+        if stamp == "current":
+            return versioned(payload, meeting)
+        if stamp is not None:
+            payload["meeting_version"] = stamp
+        return payload
+
+
+class HoldAccessControlTests(_Leg3Mixin, TestCase):
+    """Gauntlet stage 3: only the current line manager (or super) may hold, and
+    nothing returns a Held meeting to Being prepared."""
+
+    # Catches the hold gate being removed: a report marking their own meeting held.
+    def test_report_cannot_mark_meeting_held(self):
+        meeting = self.preparing()
+        self.client.force_login(self.report_user)
+        response = self.client.post(
+            self.save_url(meeting), self.page(meeting, hold=True, main_matters="Report wrote this")
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(state_of(meeting), PREPARING)
+        self.assertEqual(notes_of(meeting), "Prepared so far")
+
+    # Catches IDOR on the hold: an unrelated user holding a meeting by guessing its pk.
+    def test_stranger_cannot_mark_meeting_held(self):
+        meeting = self.preparing()
+        self.client.force_login(self.stranger_user)
+        response = self.client.post(
+            self.save_url(meeting), self.page(meeting, hold=True, main_matters="Stranger wrote this")
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertNotContains(response, "Prepared so far", status_code=403)
+        self.assertEqual(state_of(meeting), PREPARING)
+        self.assertEqual(notes_of(meeting), "Prepared so far")
+
+    # Catches an un-hold: a crafted ``state`` on the page or the admin moving a Held
+    # meeting back to Being prepared (a successor may already have pinned its actions).
+    def test_held_meeting_cannot_be_returned_to_preparing_by_posting_state(self):
+        held = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        LineMeeting.objects.filter(pk=held.pk).update(main_matters="Held notes")
+
+        for extra in ({"state": "PREPARING"}, {"state": "PREPARING", "hold": "1"}):
+            with self.subTest(extra=extra):
+                payload = self.page(held, meeting_date="2026-01-10", main_matters="Edited after held")
+                payload.update(extra)
+                response = self.client.post(self.save_url(held), payload)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(state_of(held), HELD)
+                self.assertEqual(notes_of(held), "Edited after held")
+
+        self.client.force_login(self.super_user)
+        admin_url = reverse("admin:line_management_linemeeting_change", args=[held.pk])
+        response = self.client.post(admin_url, {
+            "created_by_email": "",
+            "meeting_date": "2026-01-10",
+            "state": "PREPARING",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Edited in admin",
+            "actions_from_meeting": "",
+            "meeting_version": meeting_version(LineMeeting.objects.get(pk=held.pk)),
+            **management_form("agreed_actions"),
+            "_save": "Save",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(notes_of(held), "Edited in admin")
+        self.assertEqual(state_of(held), HELD)
+
+    # Catches meeting_new's redirect running before the chokepoint, which would hand a
+    # stranger (or the report) the pk of someone's meeting being prepared.
+    def test_stranger_meeting_new_is_403_even_when_a_meeting_is_being_prepared(self):
+        meeting = self.preparing()
+        url = reverse("line_management:meeting_new", args=[self.report.pk])
+        for user in (self.stranger_user, self.report_user):
+            with self.subTest(user=user.email):
+                self.client.force_login(user)
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 403)
+                self.assertNotIn(
+                    reverse("line_management:meeting_detail", args=[meeting.pk]),
+                    response.get("Location", ""),
+                )
+
+    # Catches the "already being prepared" hand-back echoing the other meeting's
+    # notes or actions instead of only what this page posted.
+    def test_refused_create_while_preparing_does_not_show_other_meetings_text(self):
+        other = self.preparing(notes="Private preparing notes")
+        make_action(other, "Private preparing action")
+        response = self.create(main_matters="My newly typed notes", agreed=["My new action"])
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "My newly typed notes", status_code=409)
+        self.assertContains(response, "My new action", status_code=409)
+        self.assertNotContains(response, "Private preparing notes", status_code=409)
+        self.assertNotContains(response, "Private preparing action", status_code=409)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+
+
+class StateMigrationTests(TransactionTestCase):
+    """0003 adds ``state``: every meeting that existed before it was held."""
+
+    before = [("line_management", "0002_meetingaction")]
+    after = [("line_management", "0003_linemeeting_state")]
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes())
+
+    # Catches 0003 putting existing meetings into "Being prepared" (and the
+    # one-preparing constraint then aborting the deploy for anyone with two).
+    def test_existing_meetings_migrate_to_held_not_preparing(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.before)
+        old_apps = executor.loader.project_state(self.before).apps
+        Staff = old_apps.get_model("core", "StaffMember")
+        OldMeeting = old_apps.get_model("line_management", "LineMeeting")
+        person = Staff.objects.create(email="person@oxlip.test")
+        text = "Long notes — “quoted” café ✅\r\nsecond line \U0001f600"
+        first = OldMeeting.objects.create(staff=person, meeting_date=date(2026, 1, 10), main_matters=text)
+        second = OldMeeting.objects.create(staff=person, meeting_date=date(2026, 2, 1), upcoming="Next")
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.after)
+        NewMeeting = executor.loader.project_state(self.after).apps.get_model("line_management", "LineMeeting")
+
+        rows = {m.pk: m for m in NewMeeting.objects.all()}
+        self.assertEqual(rows[first.pk].state, "HELD")
+        self.assertEqual(rows[second.pk].state, "HELD")
+        self.assertEqual(rows[first.pk].main_matters, text)
+        self.assertEqual(rows[second.pk].upcoming, "Next")
+
+
+class PreparingConstraintTests(TestCase):
+    """The database itself allows one meeting Being prepared per report."""
+
+    # Catches the partial unique constraint missing: two meetings being prepared for one report.
+    def test_second_preparing_meeting_for_same_report_is_refused_by_database(self):
+        report = make_staff("report@oxlip.test")
+        make_meeting(report, state=PREPARING)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                make_meeting(report, state=PREPARING, meeting_date=date(2026, 3, 1))
+        # Held meetings, and another person's meeting being prepared, are not limited.
+        make_meeting(report, meeting_date=date(2026, 3, 1))
+        make_meeting(make_staff("other@oxlip.test"), state=PREPARING)
+        self.assertEqual(LineMeeting.objects.filter(staff=report).count(), 2)
+
+    # Catches an app writer that omits ``state`` (the previous release, mid-deploy)
+    # inserting a meeting as Being prepared rather than Held.
+    def test_insert_omitting_state_is_held(self):
+        report = make_staff("report@oxlip.test")
+        make_meeting(report, state=PREPARING)
+        now = connection.ops.adapt_datetimefield_value(timezone.now())
+        table = connection.ops.quote_name(LineMeeting._meta.db_table)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO {table} (staff_id, created_by_email, meeting_date, "
+                "actions_from_last_meeting, upcoming, rotation_update, main_matters, "
+                "actions_from_meeting, created_at, updated_at) "
+                "VALUES (%s, '', %s, '', '', '', %s, '', %s, %s)",
+                [report.pk, connection.ops.adapt_datefield_value(date(2026, 3, 1)), "Old release", now, now],
+            )
+        inserted = LineMeeting.objects.get(staff=report, main_matters="Old release")
+        self.assertEqual(inserted.state, HELD)
+
+
+class PreparingWorkflowTests(_Leg3Mixin, TestCase):
+    """Create, carry-forward and hold for a meeting Being prepared."""
+
+    # Catches carry-forward reading a meeting still being prepared: its actions
+    # would be pinned before the meeting took place, and the held one's skipped.
+    def test_carry_forward_ignores_meeting_being_prepared(self):
+        m1 = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(m1, "A")
+        self.assertEqual(
+            self.create("2026-02-01", carried=[(a, "GREEN", "Done")], agreed=["B"], main_matters="Prep").status_code,
+            302,
+        )
+        m2 = self.newest()
+        b = MeetingAction.objects.get(description="B")
+        self.assertEqual(m2.state, PREPARING)
+        self.assertEqual(carry_forward_source(self.report), m1)
+        self.assertEqual(list(carried_forward_candidates(carry_forward_source(self.report))), [])
+
+        response = self.client.post(self.save_url(m2), self.page(
+            m2, hold=True, main_matters="Prep", existing=[(b, "B", False)], carried=[(a, "GREEN", "Done")],
+        ))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(carry_forward_source(self.report), m2)
+        self.assertEqual(list(carried_forward_candidates(m2)), [b])
+
+    # Catches _bind crashing (or refusing new actions) on a report whose only
+    # meeting is being prepared, with no Held meeting to be "the latest".
+    def test_can_add_actions_on_first_meeting_being_prepared_with_no_held_meeting(self):
+        self.assertEqual(self.create(agreed=["First action"], main_matters="First").status_code, 302)
+        meeting = self.newest()
+        self.assertEqual(meeting.state, PREPARING)
+        self.assertEqual(self.client.get(reverse("line_management:meeting_detail", args=[meeting.pk])).status_code, 200)
+
+        first = MeetingAction.objects.get(description="First action")
+        response = self.client.post(self.save_url(meeting), self.page(
+            meeting, main_matters="First", existing=[(first, "First action", False)], new=["Second action"],
+        ))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            list(meeting.agreed_actions.order_by("pk").values_list("description", flat=True)),
+            ["First action", "Second action"],
+        )
+
+    # Catches "New meeting" offering a blank form while one is already being prepared.
+    def test_new_meeting_redirects_to_meeting_being_prepared(self):
+        meeting = self.preparing()
+        response = self.client.get(reverse("line_management:meeting_new", args=[self.report.pk]))
+        self.assertRedirects(response, reverse("line_management:meeting_detail", args=[meeting.pk]))
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+
+    # Catches a create from a stale "New meeting" page losing its text (or a 500 from
+    # the constraint) when another meeting is already being prepared.
+    def test_create_while_one_is_being_prepared_hands_text_back_409(self):
+        meeting = self.preparing()
+        notes = "Typed while the other was started — “careful” café\r\nline two \U0001f600"
+        response = self.create(main_matters=notes, agreed=["Action ✅ to keep"])
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, escape(notes), status_code=409)
+        self.assertContains(response, escape("Action ✅ to keep"), status_code=409)
+        self.assertContains(
+            response, reverse("line_management:meeting_detail", args=[meeting.pk]), status_code=409
+        )
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        self.assertFalse(MeetingAction.objects.exists())
+        self.assertEqual(notes_of(meeting), "Prepared so far")
+
+    # Catches the second click of a double-clicked "Save" being answered with the
+    # "already being prepared" 409 instead of folding into the meeting it made.
+    def test_double_click_create_being_prepared_folds_not_409(self):
+        first = self.create(main_matters="Clicked twice", agreed=["Once"])
+        second = self.create(main_matters="Clicked twice", agreed=["Once"])
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(first["Location"], second["Location"])
+        meeting = LineMeeting.objects.get(staff=self.report)
+        self.assertEqual(meeting.state, PREPARING)
+        self.assertEqual(MeetingAction.objects.count(), 1)
+
+    # Catches a double-clicked "Save and mark as held" creating two Held meetings.
+    def test_double_click_save_and_hold_create_folds(self):
+        first = self.create(main_matters="Held twice", hold=True)
+        second = self.create(main_matters="Held twice", hold=True)
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(first["Location"], second["Location"])
+        meeting = LineMeeting.objects.get(staff=self.report)
+        self.assertEqual(meeting.state, HELD)
+
+    # Catches a back-dated meeting taking the one Being-prepared slot (it can review
+    # nothing), or the refusal discarding what was typed.
+    def test_back_dated_create_cannot_be_left_being_prepared(self):
+        make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        notes = "Back-dated notes — “kept” ✅"
+        response = self.create("2026-01-01", main_matters=notes)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "before the last held meeting")
+        self.assertContains(response, escape(notes))
+        self.assertFalse(LineMeeting.objects.filter(staff=self.report, state=PREPARING).exists())
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+
+    # Catches "Save and mark as held" holding without saving the notes, or altering them.
+    def test_save_and_hold_marks_held_and_keeps_notes(self):
+        meeting = self.preparing()
+        notes = "Final notes — “quoted” café naïve\r\n\r\nSecond paragraph \U0001f389"
+        response = self.client.post(self.save_url(meeting), self.page(meeting, hold=True, main_matters=notes),
+                                    follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Meeting saved and marked as held.")
+        self.assertEqual(state_of(meeting), HELD)
+        self.assertEqual(notes_of(meeting), notes)
+
+        # Re-saved unchanged from the rendered page, the text is still identical.
+        resave = self.client.post(self.save_url(meeting), self.page(meeting, main_matters=notes))
+        self.assertEqual(resave.status_code, 302)
+        self.assertEqual(notes_of(meeting), notes)
+
+    # Catches a stale page holding a meeting (bypassing the version check), or the
+    # refusal not saying the hold did not happen.
+    def test_stale_page_hold_is_refused_and_text_handed_back(self):
+        meeting = self.preparing()
+        age_meetings(meeting)
+        v0 = meeting_version(LineMeeting.objects.get(pk=meeting.pk))
+        self.assertEqual(
+            self.client.post(self.save_url(meeting), self.page(meeting, stamp=v0, main_matters="Tab one")).status_code,
+            302,
+        )
+        before = db_state()
+        typed = "Tab two — “mine” \U0001f600"
+        response = self.client.post(self.save_url(meeting), self.page(meeting, stamp=v0, hold=True, main_matters=typed))
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "It was not marked as held.", status_code=409)
+        self.assertContains(response, escape(typed), status_code=409)
+        self.assertEqual(db_state(), before)
+        self.assertEqual(state_of(meeting), PREPARING)
+
+    # Catches a stale "Save and mark as held" of an unchanged page being folded as a
+    # repeat — answered "saved" while the meeting is never held.
+    def test_stale_hold_of_unchanged_page_is_not_folded_while_still_preparing(self):
+        meeting = self.preparing(notes="Unchanged")
+        age_meetings(meeting)
+        v0 = meeting_version(LineMeeting.objects.get(pk=meeting.pk))
+        LineMeeting.objects.filter(pk=meeting.pk).update(updated_at=timezone.now())
+
+        response = self.client.post(self.save_url(meeting), self.page(meeting, stamp=v0, hold=True, main_matters="Unchanged"))
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "It was not marked as held.", status_code=409)
+        self.assertEqual(state_of(meeting), PREPARING)
+
+        # Without the hold, the same stale unchanged page is a harmless repeat.
+        plain = self.client.post(self.save_url(meeting), self.page(meeting, stamp=v0, main_matters="Unchanged"))
+        self.assertEqual(plain.status_code, 302)
+
+    # Catches a meeting with nothing in it being marked held — and the refused
+    # hold still saving the cleared fields.
+    def test_blank_meeting_cannot_be_marked_held(self):
+        meeting = self.preparing(notes="Only note")
+        response = self.client.post(self.save_url(meeting), self.page(meeting, hold=True, main_matters=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "blank meeting can")
+        self.assertEqual(state_of(meeting), PREPARING)
+        self.assertEqual(notes_of(meeting), "Only note")
+
+    # Catches holding locking the meeting: the manager must still be able to edit it.
+    def test_held_meeting_still_editable_by_manager(self):
+        meeting = self.preparing()
+        self.assertEqual(
+            self.client.post(self.save_url(meeting), self.page(meeting, hold=True, main_matters="At the meeting")).status_code,
+            302,
+        )
+        detail = self.client.get(reverse("line_management:meeting_detail", args=[meeting.pk]))
+        self.assertTrue(detail.context["can_edit"])
+        self.assertFalse(detail.context["can_hold"])
+        response = self.client.post(self.save_url(meeting), self.page(meeting, main_matters="Corrected afterwards"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(notes_of(meeting), "Corrected afterwards")
+        self.assertEqual(state_of(meeting), HELD)
+
+    # Catches an IntegrityError on create with no meeting being prepared (some other
+    # race or constraint) becoming a 500 that loses the typed text.
+    def test_create_integrity_error_without_preparing_meeting_hands_text_back(self):
+        def insert_then_clash(meeting, **kwargs):
+            meeting.save()
+            raise IntegrityError("simulated constraint clash")
+
+        notes = "Typed during a race — “keep me” \U0001f600"
+        with mock.patch("line_management.views.start_meeting", side_effect=insert_then_clash):
+            response = self.create(main_matters=notes, agreed=["Raced action"])
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, escape(notes), status_code=409)
+        self.assertContains(response, "Raced action", status_code=409)
+        self.assertFalse(LineMeeting.objects.exists())
+        self.assertFalse(MeetingAction.objects.exists())
+
+
+class PurgePreparingTests(TestCase):
+    """purge_empty_line_meetings deletes legacy empty Held meetings only."""
+
+    # Catches the purge deleting a blank meeting being prepared (work in progress).
+    def test_purge_never_deletes_a_meeting_being_prepared(self):
+        report = make_staff("report@oxlip.test")
+        held_empty = make_meeting(report, meeting_date=date(2026, 1, 10))
+        preparing_empty = make_meeting(report, state=PREPARING, meeting_date=date(2026, 2, 1))
+        call_command("purge_empty_line_meetings")
+        self.assertFalse(LineMeeting.objects.filter(pk=held_empty.pk).exists())
+        self.assertTrue(LineMeeting.objects.filter(pk=preparing_empty.pk).exists())

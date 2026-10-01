@@ -1,6 +1,6 @@
 ---
 name: project-line-meeting-collab-chart
-description: Line-management RAG actions + report pre-fill chart (drawn 2026-09-30) — settled decisions, model shape, four legs, leg-1 plan rules
+description: Line-management RAG actions + report pre-fill chart (drawn 2026-09-30) — settled decisions, model shape, four legs, leg-1/2/3 plan rules
 metadata:
   type: project
 ---
@@ -9,30 +9,35 @@ Chart drawn 2026-09-30 (round 1 all accepted), docs/chart/line-meeting-preparati
 
 Settled (do not re-open):
 - `MeetingAction`: FK `agreed_at` -> LineMeeting (related_name agreed_actions, PROTECT); FK `reviewed_in` -> LineMeeting nullable (related_name reviewed_actions, PROTECT) PINNED at creation of the next meeting — not derived from dates. RAG on the action row (one row spans two meetings, like Goal). `rag` choices RED/AMBER/GREEN, "" = not rated. CheckConstraint reviewed_in != agreed_at.
-- `LineMeeting.state` PREPARING/HELD (leg 3); AddField one-off default HELD, model default PREPARING; importer creates HELD. Partial UniqueConstraint one PREPARING per staff replaces `_existing_duplicate`.
+- `LineMeeting.state` PREPARING/HELD (leg 3); AddField one-off default HELD, model default PREPARING; importer creates HELD. Partial UniqueConstraint one PREPARING per staff.
 - `NOTE_FIELDS` stays the five legacy fields forever (import `source_row_hash`). `is_empty` counts actions; purge respects it.
 - Legacy `actions_from_last_meeting` / `actions_from_meeting`: never editable again; shown read-only when stored.
 - Version check (leg 2): token `LineMeeting.updated_at`; CAS; 409 via core/recovery.
 - Legs: 1 actions+RAG (manager), 2 stale-save refusal, 3 Held state + counts + import CAS, 4 report prepares.
 
 Leg-1 plan decisions (2026-09-30):
-- Interim carry-forward source = report's latest meeting by (meeting_date, created_at, pk). New meeting dated earlier than source pins nothing; if typed ratings on carried rows with a back-dated date -> refuse with date error (text kept). Pin ALL unreviewed source actions (not just the posted ones) via CAS `.update()`; count mismatch -> rollback + re-render.
-- Column ownership: agreed formset saves update_fields=[description, updated_at]; carried formset saves update_fields=[rag, review_comment, updated_at]. Reason: formset instances loaded before the pin carry reviewed_in=None and would unpin / wipe ratings on full save.
+- Interim carry-forward source = report's latest meeting by (meeting_date, created_at, pk). New meeting dated earlier than source pins nothing; if typed ratings on carried rows with a back-dated date -> refuse with date error (text kept). Pin ALL unreviewed source actions via CAS `.update()`; count mismatch -> rollback + re-render.
+- Column ownership: agreed formset saves description only; carried formset saves rag, review_comment only. Reason: instances loaded before the pin carry reviewed_in=None.
 - Extra CheckConstraint: rating/comment only when reviewed_in set. Django 6 CheckConstraint uses `condition=`.
-- Pinned action (reviewed_in set): description read-only, not deletable (override `_should_delete_form`).
-- Carried formset: modelformset edit_only=True, extra=0; agreed: inline fk_name agreed_at, extra 3 server-side, no JS add-row.
-- Double-submit guard extended: fold only when notes + agreed descriptions + carried ratings all equal (else actions-only meetings on same day would fold = loss).
-- Admin: MeetingAction registered (needed for core/tests GATED_MODELS registry lookup) + inline, both SuperuserOnlyDeleteMixin; no description in list_display.
-- Existing line_management tests need a management-form payload helper once formsets are bound.
+- Pinned action: description read-only, not deletable.
+- Double-submit guard `find_repeat_submission`: fold only when notes + agreed descriptions + carried ratings all equal.
+- Admin: MeetingAction registered + inline, SuperuserOnlyDeleteMixin; no description in list_display.
 
 Leg-2 plan decisions (2026-09-30):
-- Token = separate hidden input `meeting_version` (not a ModelForm DateTimeField: DateTimeInput drops microseconds and localises). Format UTC isoformat; parse fromisoformat; missing/garbled/naive -> treated as stale (409), never as "skip the check".
-- meeting_save order: get_meeting_or_403 -> can_edit 403 -> version pre-check 409 -> validate (invalid = re-render bound, same token) -> atomic CAS. The CAS `.update()` writes the token AND the non-disabled LineMeetingForm fields in one statement (no form.save(); auto_now would re-stamp). New version = max(now, old+1us).
-- Pin bumps the SOURCE meeting's version (start_meeting), and does so BEFORE pinning actions: consistent lock order (meeting row, then action rows) with meeting_save, avoids Postgres deadlock. Reason: pinning changes what N's page may edit (can_add, settled rows).
-- Agreed save_existing becomes CAS on reviewed_in null; 0 rows -> MeetingChanged -> rollback -> 409.
-- Conflict UX = core.recovery.render_save_blocked (409), with optional `labels=` override (section names; carried rows labelled with wording from THIS meeting's reviewed_actions only). `meeting_version` added to recovery skip set.
-- Admin MeetingAction saves touch agreed_at + reviewed_in meetings; importer UPDATE adds updated_at=now (closes .update() bypass until leg 3 CAS).
-- meeting_create out of leg 2 (leg-1 refuse_stale + pin CAS cover it). No migration.
+- Token = hidden input `meeting_version` (UTC isoformat); missing/garbled -> stale (409), never skip.
+- meeting_save order: get_meeting_or_403 -> can_edit 403 -> version pre-check 409 (or fold via _is_exact_repeat) -> validate -> atomic CAS `.update()` writing token + editable fields in one statement.
+- Lock order everywhere: meeting rows before action rows (Postgres deadlock). Pin touches SOURCE meeting first.
+- Admin forms stale-checked under select_for_update; importer UPDATE touches meeting.
+
+Leg-3 plan decisions (2026-10-01):
+- Hold is NOT a separate endpoint: "Save and mark as held" second submit button (`hold=1`) on create and on a PREPARING meeting's page; state=HELD written in the same CAS UPDATE. First button in DOM = plain Save (Enter key must not trigger irreversible hold). No un-hold anywhere (admin `state` read-only on change).
+- `can_hold_meeting(role)` separate from `can_edit_meeting` (leg 4 widens edit to report, never hold).
+- find_repeat_submission STAYS (chart said constraint replaces it — wrong once a create can be HELD; the constraint only guards PREPARING creates and is the race backstop). No new create of any state while a PREPARING exists: meeting_new redirects to it, meeting_create 409 hand-back (after the repeat-fold check).
+- Split services: `latest_meeting(member)` = old unfiltered body, used for can_add; `carry_forward_source` = latest HELD. _bind's `carry_forward_source(...).pk` would AttributeError on None otherwise.
+- Back-dated create (before latest Held) may only be saved Held (date error otherwise).
+- Hold refused when the page would be blank by the create rule (shared helper).
+- Importer: hash includes the notes, so a hash match means incoming == what the prior import wrote; CAS = stored notes equal incoming, else SKIP "edited in the app since import" (in validate for preview, and conditional .update in apply). No raw_json lookup needed. Importer CREATE skips if the staff member has unreviewed actions agreed on/before the row date (would strand them).
+- Test fixtures (make_meeting, team/overview tests) must pass state=HELD — default PREPARING + constraint breaks multi-meeting fixtures.
 
 **Why:** article 6 (nothing lost), import dedupe hash stability, owner-vs-viewer and live-lookup rules already in the app.
-**How to apply:** plan legs 2-4 inside these; leg 3 narrows the source filter to state=HELD and retires the extended duplicate guard.
+**How to apply:** leg 4 widens can_edit to the report while PREPARING, keeps hold manager-only, reuses the one-PREPARING refusal for the report-start view.

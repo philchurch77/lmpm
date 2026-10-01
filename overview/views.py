@@ -30,12 +30,12 @@ from collections import Counter
 
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from django.db.models import Count, Max
 from django.shortcuts import render
 
 from core.models import School, StaffMember
 
 from appraisals.models import AcademicYear, Appraisal
+from line_management.services import held_meeting_summary
 
 
 def _require_superuser(request):
@@ -93,8 +93,9 @@ def classify(member, appraisal):
 def classify_line(member, meeting_count):
     """Map a staff member + their line-meeting count to a status.
 
-    Returns ``(state, label)``. Line meetings are recurring with no status field,
-    so this reflects engagement, not completion: a blank ``line_manager_email`` is
+    Returns ``(state, label)``. ``meeting_count`` counts **Held** meetings only
+    (a meeting still being prepared has not taken place). Line meetings recur
+    rather than complete, so this reflects engagement: a blank ``line_manager_email`` is
     a data-prep gap ("No manager") that takes priority — like "not classified" on
     the appraisals page — because such a person can have no meetings by design;
     otherwise it's simply whether any meeting has been recorded. A pure function
@@ -160,13 +161,12 @@ def line_management_overview(request):
     """Superuser-only: every staff member's line-meeting engagement."""
     _require_superuser(request)
 
-    # Per-staff meeting count + last-meeting date in one annotated query (no
+    # Per-staff Held-meeting count + last Held date in one annotated query (no
     # N+1), exactly as the team page does.
     base_qs = (
         StaffMember.objects.select_related("school")
         .annotate(
-            meeting_count=Count("line_meetings"),
-            last_meeting=Max("line_meetings__meeting_date"),
+            **held_meeting_summary(),
         )
         .order_by("email")
     )

@@ -445,7 +445,8 @@ a person's `StaffMember`) records structured notes for the people they line-mana
 person (the **report**) views their own records read-only. Mounted at `/line-management/`. Mirrors
 the appraisals app's patterns (email identity, role-gated form, `get_*_or_403` IDOR chokepoint,
 `reflection-card` styling, a context processor driving a conditional nav link) but is deliberately
-simpler — one editor, no status/lock, no field split.
+simpler — one editor, no lock, no field split. A meeting has two states (`PREPARING` "Being
+prepared" / `HELD`); a Held meeting stays editable by the manager — see "Being prepared / Held".
 
 ### Model (`line_management/models.py`)
 - `LineMeeting` — **many per staff member** (one per meeting, not one-per-year like `Appraisal`).
@@ -471,11 +472,13 @@ simpler — one editor, no status/lock, no field split.
   **A pinned action is settled**: its wording is disabled and it cannot be deleted (the formset drops
   `DELETE` and `_should_delete_form` refuses a crafted one).
 - **Carry-forward is pinned, not derived** (`line_management/services.py`): `start_meeting` pins the
-  unreviewed actions of the report's latest meeting (by `meeting_date`, then `created_at`, then pk)
-  in the create transaction, with a compare-and-swap `.update()` that rolls the whole create back
-  (`CarryForwardChanged`, text handed back) if another request pinned them first. A meeting dated
-  **before** that source pins nothing, and is refused if the manager typed ratings for it. Leg 3 of
-  `docs/chart/line-meeting-preparation.md` narrows the source to Held meetings.
+  unreviewed actions of the report's latest **Held** meeting (`carry_forward_source`: by
+  `meeting_date`, then `created_at`, then pk) in the create transaction, with a compare-and-swap
+  `.update()` that rolls the whole create back (`CarryForwardChanged`, text handed back) if another
+  request pinned them first. A meeting dated **before** that source pins nothing, and is refused if
+  the manager typed ratings for it. `can_add` (new actions) follows `latest_meeting`, which is **any**
+  state — a meeting being prepared is the latest. Don't swap the two: `_bind` once used the source's
+  pk, which is `None` for a report whose only meeting is being prepared.
 - **Legacy action prose**: `actions_from_last_meeting` / `actions_from_meeting` are on no form, so no
   save can overwrite them; stored text is shown read-only ("Recorded as notes"). On a new meeting the
   source meeting's legacy `actions_from_meeting` is shown for reference. Never split into rows.
@@ -517,7 +520,27 @@ simpler — one editor, no status/lock, no field split.
 - **Only the current line manager (or super) edits**; the report is read-only. `LineMeetingForm`
   takes `can_edit=` and sets `field.disabled=True` on every field when False (the real security
   boundary), and `meeting_save` re-checks `can_edit_meeting` and 403s otherwise. There is no
-  status/lock — the line manager can always edit.
+  lock — the line manager can always edit, Held or not.
+
+### Being prepared / Held (leg 3 of `docs/chart/line-meeting-preparation.md`)
+- `LineMeeting.state`: Python default `PREPARING`, **`db_default` `HELD`** — existing rows migrated
+  to Held, and an insert that omits the column (the previous release, still serving while a deploy
+  migrates; raw SQL) is Held. Partial `UniqueConstraint`: at most one `PREPARING` per staff member.
+- **Holding** is the "Save and mark as held" button (`name="hold"`) on the normal save, so it rides
+  `save_meeting_page`'s one conditional UPDATE — a stale page can never hold. "Save" is first in the
+  DOM so Enter never holds. Honoured only if `can_hold_meeting(role)` (kept separate from
+  `can_edit_meeting` so leg 4 can let the report edit but not hold) and the meeting is not Held.
+  **No un-hold anywhere**: `state` is on no form, and read-only in the admin once saved (a successor
+  may already have pinned its actions). A blank page cannot be held (`page_would_be_blank`, shared
+  with create).
+- **One being prepared per person**: `meeting_new` redirects to it; `meeting_create` folds an exact
+  repeat first (a hold folds only into a meeting already Held, else the hold is dropped silently),
+  then hands the text back (409) if one exists; the constraint's `IntegrityError` re-checks the fold
+  and otherwise hands back — never a 500. A create dated before the latest Held meeting may only be
+  saved Held. `find_repeat_submission` is kept: the constraint cannot replace it, since a meeting can
+  be created already Held.
+- My Team and the overview count **Held meetings only** (`services.held_meeting_summary`). My Team
+  shows "Continue meeting" for a person with one being prepared.
 
 ### Views & nav
 - **Views** (`line_management/views.py`, function-based, `@login_required`, P/R/G): `my_meetings`
@@ -548,7 +571,8 @@ The report needs a matching Django `User` (same email, for SSO) and a `StaffMemb
   `appraisals/tests.py` has its own suite (see "Appraisals app" → "Known follow-ups" above);
   `core/tests.py` covers the SSO auth gate and the `check_readiness` audit command.
 - Any pre-existing blank records from the old "create-then-fill" flow can be cleared with
-  `manage.py purge_empty_line_meetings` (`--dry-run` to preview first).
+  `manage.py purge_empty_line_meetings` (`--dry-run` to preview first). It deletes **Held** empties
+  only: a meeting being prepared is work in progress whose page may be open.
 - `_messages.html` / `no_staff.html` are now duplicated across `appraisals/`, `line_management/`,
   and `team/` (plus an inlined copy in `templates/account/login.html`) — still pending promotion into
   `core/templates/`.
@@ -573,8 +597,8 @@ status page and a line-management engagement page. **Owns no models**; like `tea
 feature apps rather than re-deriving permission logic — a single `_require_superuser` gate (403
 otherwise) is the only access check these views need, since each is a flat read across *every*
 `StaffMember`. `classify()` / `classify_line()` are pure functions mapping a staff member (+ their
-current appraisal / meeting count) to a status bucket, kept separate from the views so they're
-unit-testable. A shared school/email filter (`overview/_filters.html`) narrows the *view*; the
+current appraisal / **Held** meeting count) to a status bucket, kept separate from the views so
+they're unit-testable. A shared school/email filter (`overview/_filters.html`) narrows the *view*; the
 underlying scope is deliberately trust-wide, including staff with no appraisal, no line manager, or no
 login account, because surfacing who has **not** engaged is the point. The per-row "Open" links reuse
 the appraisals/line-management detail views' own `get_*_or_403` chokepoints (which treat a superuser
@@ -627,8 +651,15 @@ Four of the five import types upsert on a real model uniqueness constraint (teac
 a batch naturally idempotent. `LineMeeting` has no such constraint (multiple genuine meetings can
 share a staff+date), so its dedupe instead hashes each row's natural fields
 (`ImportRow.source_row_hash`) and checks for a match against **every previous batch** of that import
-type, not just the current one — re-uploading the same export as a fresh batch updates the
-previously-created meeting instead of duplicating it.
+type, not just the current one — re-uploading the same export as a fresh batch matches the
+previously-created meeting instead of duplicating it. **A match never rewrites notes**: the hash proves
+the incoming notes equal what the earlier import wrote, so if the stored notes differ, someone edited
+the meeting in the app and the row is SKIPped ("Edited in the app since it was imported"). Apply is a
+compare-and-swap on the notes (`MeetingEditedSinceImport` → SKIP), so an edit between preview and
+confirm is caught too; only `created_by_email` is ever written on that path. The compare is exact — a
+re-saved export differing only in line endings reports a harmless skip. Imported meetings are created
+**Held**, and a CREATE is skipped if it would strand unreviewed actions
+(`line_management.services.would_strand_actions`).
 
 Self-review import is the trickiest case: one CSV row is one scorable bullet (`item_code` +
 `bullet_order`), and `confirm_batch` groups rows by `(teacher_email, academic_year)` so

@@ -84,6 +84,15 @@ def can_edit_meeting(role) -> bool:
     return role in {ROLE_MANAGER, ROLE_SUPER}
 
 
+def can_hold_meeting(role) -> bool:
+    """Only the current line manager (or a superuser) may mark a meeting Held.
+
+    Deliberately separate from ``can_edit_meeting``: leg 4 lets the report edit a
+    meeting being prepared, but holding it stays the line manager's call.
+    """
+    return role in {ROLE_MANAGER, ROLE_SUPER}
+
+
 def get_meeting_or_403(request, pk):
     """Fetch a meeting and the viewer's role, or raise 403.
 

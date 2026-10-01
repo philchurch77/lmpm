@@ -15,6 +15,7 @@
         <thead>
           <tr>
             <th>Meeting date</th>
+            <th>Status</th>
             <th>Recorded by</th>
             <th></th>
           </tr>
@@ -23,6 +24,7 @@
           {% for meeting in meetings %}
             <tr>
               <td>{{ meeting.meeting_date }}</td>
+              <td>{% include "line_management/_state_badge.html" %}</td>
               <td>{{ meeting.created_by_email|default:"—" }}</td>
               <td><a class="button button--small" href="{% url 'line_management:meeting_detail' pk=meeting.pk %}">Open</a></td>
             </tr>
@@ -46,6 +48,7 @@
           <tr>
             <th>Staff member</th>
             <th>Meeting date</th>
+            <th>Status</th>
             <th>Recorded by</th>
             <th></th>
           </tr>
@@ -55,6 +58,7 @@
             <tr>
               <td>{{ meeting.staff.email }}{% if meeting.staff.department %} · {{ meeting.staff.department }}{% endif %}</td>
               <td>{{ meeting.meeting_date }}</td>
+              <td>{% include "line_management/_state_badge.html" %}</td>
               <td>{{ meeting.created_by_email|default:"—" }}</td>
               <td><a class="button button--small" href="{% url 'line_management:meeting_detail' pk=meeting.pk %}">Open</a></td>
             </tr>

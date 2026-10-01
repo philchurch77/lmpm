@@ -43,7 +43,7 @@ from appraisals.models import (
 from appraisals.self_review_templates import SUPPORT_ITEMS, TEACHING_ITEMS
 from core.models import School, StaffMember
 from line_management.models import LineMeeting
-from line_management.services import touch_meetings
+from line_management.services import touch_meetings, would_strand_actions
 
 from .models import ImportBatch, ImportedModel, ImportRow, ImportType
 
@@ -526,6 +526,17 @@ def apply_self_review_row(self_review: SelfReview, resolved: dict):
 
 # --- Line meetings -----------------------------------------------------------
 
+EDITED_IN_APP = "Edited in the app since it was imported — left unchanged."
+STRANDS_ACTIONS = (
+    "This person has a meeting on or before this date with actions still to be reviewed. "
+    "Importing this meeting would mean they never come up for review — left out. Add it "
+    "in the app instead, or review those actions first."
+)
+
+
+class MeetingEditedSinceImport(Exception):
+    """A previously-imported meeting's notes changed between validate and apply."""
+
 
 def validate_line_meeting_row(data: dict, uploaded_by_email: str = "") -> ValidationResult:
     errors = []
@@ -566,6 +577,20 @@ def validate_line_meeting_row(data: dict, uploaded_by_email: str = "") -> Valida
         .first()
     )
     existing_pk = existing_row.created_object_pk if existing_row else None
+    if existing_pk and not LineMeeting.objects.filter(pk=existing_pk).exists():
+        existing_pk = None
+
+    if existing_pk:
+        # The hash match proves the incoming notes equal what the earlier import
+        # wrote. If the stored notes now differ, someone has edited the meeting
+        # in the app since — and re-importing must not overwrite their work.
+        stored = LineMeeting.objects.filter(pk=existing_pk).values(*LineMeeting.NOTE_FIELDS).first()
+        if stored != notes:
+            return ValidationResult(False, ImportRow.Outcome.SKIP, [EDITED_IN_APP])
+    elif would_strand_actions(staff, meeting_date):
+        # Imported meetings are Held (see would_strand_actions).
+        return ValidationResult(False, ImportRow.Outcome.SKIP, [STRANDS_ACTIONS])
+
     outcome = ImportRow.Outcome.UPDATE if existing_pk else ImportRow.Outcome.CREATE
 
     return ValidationResult(
@@ -584,19 +609,35 @@ def validate_line_meeting_row(data: dict, uploaded_by_email: str = "") -> Valida
 
 
 def apply_line_meeting_row(data: dict, resolved: dict):
-    defaults = dict(resolved["notes"])
-    if resolved["created_by"]:
-        defaults["created_by_email"] = resolved["created_by"]
+    notes = resolved["notes"]
+    created_by = resolved["created_by"]
+    existing_pk = resolved["existing_pk"]
 
-    if resolved["existing_pk"] and LineMeeting.objects.filter(pk=resolved["existing_pk"]).exists():
-        # .update() bypasses auto_now; the meeting's version must still move so an
-        # open meeting page refuses to save over the imported text.
-        LineMeeting.objects.filter(pk=resolved["existing_pk"]).update(**defaults)
-        touch_meetings(resolved["existing_pk"])
-        return ImportedModel.LINE_MEETING, resolved["existing_pk"]
+    if existing_pk:
+        # Compare-and-swap. Notes are never written on this path: the hash match
+        # means the incoming notes are what the earlier import wrote, so the
+        # only thing that can still change is ``created_by_email``. Matching on
+        # the incoming notes makes an in-app edit made between preview and
+        # confirm (or since the validate step above) a refusal, not an overwrite.
+        unchanged = LineMeeting.objects.filter(pk=existing_pk, **notes)
+        if not unchanged.exists():
+            raise MeetingEditedSinceImport(EDITED_IN_APP)
+        if created_by:
+            # .update() bypasses auto_now; the meeting's version must still move
+            # so an open meeting page refuses to save over the change.
+            if unchanged.exclude(created_by_email=created_by).update(created_by_email=created_by):
+                touch_meetings(existing_pk)
+        return ImportedModel.LINE_MEETING, existing_pk
 
+    defaults = dict(notes)
+    if created_by:
+        defaults["created_by_email"] = created_by
+    # Imports are records of meetings that took place.
     meeting = LineMeeting.objects.create(
-        staff=resolved["staff"], meeting_date=resolved["meeting_date"], **defaults
+        staff=resolved["staff"],
+        meeting_date=resolved["meeting_date"],
+        state=LineMeeting.State.HELD,
+        **defaults,
     )
     return ImportedModel.LINE_MEETING, meeting.pk
 
@@ -703,6 +744,9 @@ def _confirm_one_row(
     try:
         with transaction.atomic():
             model_name, pk = apply_fn(row.raw_json, result.resolved)
+    except MeetingEditedSinceImport as exc:
+        _skip_row(row, str(exc))
+        return
     except Exception as exc:
         _skip_row(row, f"Failed to apply: {exc}")
         return

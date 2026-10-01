@@ -17,7 +17,6 @@ their own ``get_*_or_403`` IDOR chokepoints — this page adds no new access pat
 from __future__ import annotations
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Count, Max
 from django.shortcuts import render
 
 from core.identity import current_staff_member
@@ -25,6 +24,8 @@ from core.identity import current_staff_member
 from appraisals.models import Appraisal
 from appraisals.permissions import coached_staff
 from line_management.permissions import line_managed_staff
+from line_management.models import LineMeeting
+from line_management.services import held_meeting_summary
 
 
 @login_required
@@ -43,12 +44,19 @@ def my_team(request):
         ).select_related("academic_year")
     }
 
-    # People I line-manage + a meeting summary.
+    # People I line-manage + a summary of their Held meetings.
     managed = {
         m.pk: m
         for m in line_managed_staff(staff).annotate(
-            meeting_count=Count("line_meetings"),
-            last_meeting=Max("line_meetings__meeting_date"),
+            **held_meeting_summary(),
+        )
+    }
+
+    # The meeting being prepared for each, if any (at most one per person).
+    preparing = {
+        m.staff_id: m
+        for m in LineMeeting.objects.filter(
+            staff__in=managed.values(), state=LineMeeting.State.PREPARING
         )
     }
 
@@ -65,6 +73,7 @@ def my_team(request):
                 "appraisal": appraisals.get(pk),
                 "meeting_count": getattr(managed_member, "meeting_count", 0),
                 "last_meeting": getattr(managed_member, "last_meeting", None),
+                "preparing": preparing.get(pk),
             }
         )
     rows.sort(key=lambda r: r["member"].email)

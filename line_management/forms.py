@@ -181,6 +181,12 @@ class BaseAgreedActionFormSet(BaseInlineFormSet):
         """The action texts typed into the blank rows (after ``is_valid()``)."""
         return [f.cleaned_data["description"] for f in self.extra_forms if f.has_changed()]
 
+    def keeps_any_action(self) -> bool:
+        """Whether the meeting will hold any agreed action after this save (after
+        ``is_valid()``): a saved row not ticked for deletion, or a new one typed."""
+        deleted = self.deleted_forms
+        return any(f not in deleted for f in self.initial_forms) or bool(self.new_descriptions())
+
     def save_existing(self, form, obj, commit=True):
         obj = form.save(commit=False)
         if commit:

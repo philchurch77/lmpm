@@ -2,7 +2,7 @@
 recognising a repeated create submission.
 
 Carry-forward is **pinned, not derived**: when a meeting is created, the
-unreviewed actions agreed at the report's latest meeting get ``reviewed_in`` set
+unreviewed actions agreed at the report's latest **Held** meeting get ``reviewed_in`` set
 to the new meeting, once, inside the create transaction. Deriving "the previous
 meeting by date" at read time was rejected — a back-dated or imported meeting
 would silently move actions (and their ratings) onto a different meeting.
@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 
 from django.db import transaction
+from django.db.models import Count, Max, Q
 from django.utils import timezone
 
 from .models import LineMeeting, MeetingAction
@@ -75,8 +76,12 @@ def touch_meetings(*pks):
 
 
 @transaction.atomic
-def save_meeting_page(meeting, version, form, agreed, carried):
+def save_meeting_page(meeting, version, form, agreed, carried, *, hold=False):
     """Save a meeting page only if the meeting is still at ``version``.
+
+    ``hold`` also marks the meeting Held, inside the same conditional UPDATE, so
+    a hold inherits the version check: a stale page can never hold a meeting.
+    The caller decides whether the viewer may hold (``can_hold_meeting``).
 
     One conditional UPDATE writes the new version and the note fields this user
     may edit (never ``form.save()``: that is a full-row write of an instance
@@ -89,6 +94,8 @@ def save_meeting_page(meeting, version, form, agreed, carried):
     editable = {
         name: getattr(meeting, name) for name, field in form.fields.items() if not field.disabled
     }
+    if hold:
+        editable["state"] = LineMeeting.State.HELD
     new_version = _next_version(version)
     updated = LineMeeting.objects.filter(pk=meeting.pk, updated_at=version).update(
         updated_at=new_version, **editable
@@ -96,21 +103,82 @@ def save_meeting_page(meeting, version, form, agreed, carried):
     if updated != 1:
         raise MeetingChanged
     meeting.updated_at = new_version
+    if hold:
+        meeting.state = LineMeeting.State.HELD
     agreed.save()
     carried.save()
+
+
+_LATEST_FIRST = ("-meeting_date", "-created_at", "-pk")
+
+
+def latest_meeting(member):
+    """``member``'s latest meeting in any state (by date, then creation order), or ``None``.
+
+    The only meeting that may record new actions: one added to an older meeting
+    would never be carried forward, so it would never come up for review.
+    """
+    return LineMeeting.objects.filter(staff=member).order_by(*_LATEST_FIRST).first()
 
 
 def carry_forward_source(member):
     """The meeting whose unreviewed actions a new meeting for ``member`` reviews.
 
-    The latest meeting by date (ties broken by creation order), or ``None``.
-    Leg 3 of the line-meeting-preparation chart narrows this to Held meetings.
+    The latest **Held** meeting by date (ties broken by creation order), or
+    ``None``. A meeting still being prepared is never a source: its actions are
+    not settled until it has been held.
     """
     return (
-        LineMeeting.objects.filter(staff=member)
-        .order_by("-meeting_date", "-created_at", "-pk")
+        LineMeeting.objects.filter(staff=member, state=LineMeeting.State.HELD)
+        .order_by(*_LATEST_FIRST)
         .first()
     )
+
+
+def held_meeting_summary():
+    """Annotations for a ``StaffMember`` queryset: ``meeting_count`` and
+    ``last_meeting`` over **Held** meetings only.
+
+    Shared by the My Team and overview dashboards, which report meetings that
+    have taken place; a meeting still being prepared has not.
+    """
+    held = Q(line_meetings__state=LineMeeting.State.HELD)
+    return {
+        "meeting_count": Count("line_meetings", filter=held),
+        "last_meeting": Max("line_meetings__meeting_date", filter=held),
+    }
+
+
+def preparing_meeting(member):
+    """``member``'s meeting being prepared (at most one, by constraint), or ``None``."""
+    return LineMeeting.objects.filter(staff=member, state=LineMeeting.State.PREPARING).first()
+
+
+def page_would_be_blank(meeting, agreed, carried) -> bool:
+    """Whether a meeting page, as submitted, holds nothing worth keeping.
+
+    The one rule shared by create (a blank meeting is not saved) and hold (a
+    blank meeting is not held): no note, no agreed action left after this save,
+    and no rating or comment on a carried action. Pinning last meeting's actions
+    alone is not content. Call after the forms have validated (``is_valid()``
+    has applied the posted notes to ``meeting``).
+    """
+    return not (meeting.has_notes or carried.has_rating() or agreed.keeps_any_action())
+
+
+def would_strand_actions(member, meeting_date) -> bool:
+    """Whether adding a Held meeting for ``member`` on ``meeting_date`` would strand actions.
+
+    A Held meeting dated on or after a meeting with actions still to review
+    becomes the carry-forward source in that meeting's place, so those actions
+    would never come up for review. Actions agreed at a meeting being prepared
+    count too: once it is held, the later-dated meeting would still be the source.
+    """
+    return MeetingAction.objects.filter(
+        agreed_at__staff=member,
+        agreed_at__meeting_date__lte=meeting_date,
+        reviewed_in__isnull=True,
+    ).exists()
 
 
 def carried_forward_candidates(source):

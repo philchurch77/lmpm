@@ -16,7 +16,7 @@ from __future__ import annotations
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
-from django.db import OperationalError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -31,6 +31,7 @@ from .permissions import (
     ROLE_MANAGER,
     ROLE_SUPER,
     can_edit_meeting,
+    can_hold_meeting,
     get_managed_staff_or_403,
     get_meeting_or_403,
     line_managed_staff,
@@ -41,15 +42,20 @@ from .services import (
     carried_forward_candidates,
     carry_forward_source,
     find_repeat_submission,
+    latest_meeting,
     may_carry_from,
     meeting_version,
+    page_would_be_blank,
     parse_version,
+    preparing_meeting,
     save_meeting_page,
     start_meeting,
 )
 
 AGREED_PREFIX = "agreed"
 CARRIED_PREFIX = "carried"
+# The name of the "Save and mark as held" submit button.
+HOLD_FIELD = "hold"
 
 
 @login_required
@@ -84,7 +90,7 @@ def staff_meetings(request, staff_pk):
     return render(
         request,
         "line_management/staff_meetings.html",
-        {"member": member, "meetings": meetings},
+        {"member": member, "meetings": meetings, "preparing": preparing_meeting(member)},
     )
 
 
@@ -99,7 +105,8 @@ def _bind(meeting, carried_queryset, *, can_edit, data=None):
     form = LineMeetingForm(data, instance=meeting, can_edit=can_edit)
     # New actions only on the latest meeting: one added to an older meeting would
     # never be carried forward, so it would never come up for review.
-    is_latest = meeting.pk is None or carry_forward_source(meeting.staff).pk == meeting.pk
+    # Any state: a meeting being prepared is the latest, and records new actions.
+    is_latest = meeting.pk is None or latest_meeting(meeting.staff).pk == meeting.pk
     agreed = AgreedActionFormSet(
         data,
         instance=meeting,
@@ -144,6 +151,10 @@ def _typed_ratings(carried, member):
 def _render(request, *, meeting, member, role, can_edit, forms, form_action, is_new, source=None,
             typed_ratings=()):
     form, agreed, carried = forms
+    # "Save and mark as held" is offered while the meeting is new or being
+    # prepared, and only to someone who may hold it. A Held meeting is never
+    # returned to preparing, so it shows a single Save.
+    can_hold = can_hold_meeting(role) and (is_new or not meeting.is_held)
     return render(
         request,
         "line_management/meeting_detail.html",
@@ -152,6 +163,7 @@ def _render(request, *, meeting, member, role, can_edit, forms, form_action, is_
             "member": member,
             "role": role,
             "can_edit": can_edit,
+            "can_hold": can_hold,
             "form": form,
             "agreed_formset": agreed,
             "carried_formset": carried,
@@ -212,6 +224,15 @@ def meeting_new(request, staff_pk):
     click leaves no record behind and pins no actions.
     """
     member, _staff = get_managed_staff_or_403(request, staff_pk)
+    preparing = preparing_meeting(member)
+    if preparing is not None:
+        # At most one meeting per person is being prepared; carry on with it.
+        messages.info(
+            request,
+            "A meeting is already being prepared for this person, so it has been opened "
+            "instead of a new one.",
+        )
+        return redirect("line_management:meeting_detail", pk=preparing.pk)
     source = carry_forward_source(member)
     meeting = LineMeeting(staff=member, meeting_date=timezone.localdate())
     forms = _bind(meeting, carried_forward_candidates(source), can_edit=True)
@@ -223,32 +244,23 @@ def meeting_new(request, staff_pk):
 def meeting_create(request, staff_pk):
     """Persist a new meeting from the submitted forms (create-on-save).
 
-    Saving creates the meeting, carries the last meeting's unreviewed actions
-    into it, stores their ratings and stores the newly agreed actions — all in
-    one transaction.
+    Saving creates the meeting, carries the last Held meeting's unreviewed
+    actions into it, stores their ratings and stores the newly agreed actions —
+    all in one transaction. "Save" leaves it being prepared; "Save and mark as
+    held" (``HOLD_FIELD``) creates it Held.
     """
     member, _staff = get_managed_staff_or_403(request, staff_pk)
     if f"{AGREED_PREFIX}-TOTAL_FORMS" not in request.POST:
-        # A page from before actions were rows (e.g. open across a deploy) posts
-        # fields no form reads any more; a bound re-render would drop them.
-        return render_save_blocked(
-            request,
-            heading="This page is out of date",
-            explanation=(
-                "The meeting form changed after you opened this page, so nothing was saved. "
-                "Everything you typed is below: start the new meeting again and add it back in."
-            ),
-            back_url=reverse("line_management:meeting_new", args=[member.pk]),
-            back_label="Start the meeting again",
-            labels={
-                **_NOTE_LABELS,
-                "actions_from_last_meeting": "Actions from the last meeting",
-                "actions_from_meeting": "Actions from this meeting",
-            },
-        )
+        return _refuse_out_of_date(request, member)
+    # Only managers and superusers reach this view, and both may hold.
+    hold = HOLD_FIELD in request.POST
     source = carry_forward_source(member)
     candidates = carried_forward_candidates(source)
-    meeting = LineMeeting(staff=member, created_by_email=request.user.email or "")
+    meeting = LineMeeting(
+        staff=member,
+        created_by_email=request.user.email or "",
+        state=LineMeeting.State.HELD if hold else LineMeeting.State.PREPARING,
+    )
     forms = _bind(meeting, candidates, can_edit=True, data=request.POST)
     form, agreed, carried = forms
 
@@ -273,12 +285,16 @@ def meeting_create(request, staff_pk):
         fresh = (form, agreed, _carried_formset(carried_forward_candidates(current), can_edit=True))
         return _render_new(request, member, current, fresh, _typed_ratings(carried, member))
 
-    # Double-submit guard. Checked before the carried formset is validated: on
-    # the second request of a double-click, the first request has already pinned
-    # the carried actions to its new meeting, so they no longer belong to this
-    # request's candidates. Only an exact repeat (notes, agreed actions and
-    # carried ratings) is folded in; a genuine second meeting is still created.
-    if form.is_valid() and agreed.is_valid():
+    def find_repeat():
+        # Double-submit guard. Checked before the carried formset is validated:
+        # on the second request of a double-click, the first request has already
+        # pinned the carried actions to its new meeting, so they no longer belong
+        # to this request's candidates. Only an exact repeat (notes, agreed
+        # actions and carried ratings) is folded in; a genuine second meeting is
+        # still created. A "Save and mark as held" folds only into a meeting
+        # that is already Held — otherwise the hold would be dropped in silence.
+        if not (form.is_valid() and agreed.is_valid()):
+            return None
         duplicate = find_repeat_submission(
             meeting,
             agreed.new_descriptions(),
@@ -286,9 +302,17 @@ def meeting_create(request, staff_pk):
                 existing.reviewed_actions.all(), can_edit=True, data=request.POST
             ),
         )
-        if duplicate is not None:
-            messages.success(request, "Meeting saved.")
-            return redirect("line_management:meeting_detail", pk=duplicate.pk)
+        if duplicate is not None and hold and not duplicate.is_held:
+            return None
+        return duplicate
+
+    duplicate = find_repeat()
+    if duplicate is not None:
+        return _fold(request, duplicate)
+
+    preparing = preparing_meeting(member)
+    if preparing is not None:
+        return _refuse_preparing(request, preparing, member)
 
     if carried.posted_ids() != {str(pk) for pk in candidates.values_list("pk", flat=True)}:
         return refuse_stale()
@@ -296,14 +320,22 @@ def meeting_create(request, staff_pk):
     if not (form.is_valid() and agreed.is_valid() and carried.is_valid()):
         return refuse("Please correct the errors below.")
 
-    # is_valid() has applied the cleaned notes to ``meeting``. Pinning last
-    # meeting's actions alone is not content: a date plus untouched carried
-    # actions is still a blank meeting.
-    if meeting.is_empty and not agreed.new_descriptions() and not carried.has_rating():
+    # is_valid() has applied the cleaned notes to ``meeting``.
+    if page_would_be_blank(meeting, agreed, carried):
         return refuse("Add at least one note or action before saving the meeting.")
 
     pin = may_carry_from(source, meeting.meeting_date)
     back_dated = source is not None and not pin
+    if back_dated and not hold:
+        # Dated before the last held meeting, it could never review anything,
+        # yet it would take the one being-prepared slot.
+        form.add_error(
+            "meeting_date",
+            f"This date is before the last held meeting ({source.meeting_date:%d/%m/%Y}). "
+            "A meeting dated before it can only be recorded as already held: use “Save and "
+            "mark as held”, or change the date.",
+        )
+        return refuse("Please correct the errors below.")
     if back_dated and (carried.has_rating() or agreed.new_descriptions()):
         form.add_error(
             "meeting_date",
@@ -321,8 +353,33 @@ def meeting_create(request, staff_pk):
             agreed.save()
     except CarryForwardChanged:
         return refuse_stale()
+    except IntegrityError:
+        # The one-preparing-per-person constraint: another request started a
+        # meeting between the checks above and this insert (a racing
+        # double-click, or the other party). Nothing was saved, so fold into an
+        # exact repeat or hand the text back.
+        duplicate = find_repeat()
+        if duplicate is not None:
+            return _fold(request, duplicate)
+        preparing = preparing_meeting(member)
+        if preparing is None:
+            # The racing meeting has gone again, or this was some other
+            # constraint. Nothing was saved either way: hand the text back.
+            return render_save_blocked(
+                request,
+                heading="This meeting could not be saved",
+                explanation=(
+                    "Something changed for this person while you were writing (another meeting "
+                    "may have been saved), so nothing from this page was saved. Everything you "
+                    "typed is below: open their meetings and add it back in."
+                ),
+                back_url=reverse("line_management:staff_meetings", args=[member.pk]),
+                back_label="Open this person's meetings",
+                labels=_handback_labels(request.POST, _member_actions(member)),
+            )
+        return _refuse_preparing(request, preparing, member)
 
-    messages.success(request, "Meeting saved.")
+    messages.success(request, _saved_message(meeting.is_held))
     if back_dated and carried.forms:
         messages.info(
             request,
@@ -362,6 +419,10 @@ def meeting_save(request, pk):
     # This pre-check is NOT redundant with the compare-and-swap in
     # save_meeting_page: it is what stops an invalid stale POST re-rendering with
     # the current stamp (see _render), which would launder a stale page.
+    # Holding is honoured only for someone who may hold, on a meeting still being
+    # prepared. There is no way back from Held, and no posted value can return a
+    # meeting to preparing: ``state`` is on no form.
+    hold = HOLD_FIELD in request.POST and can_hold_meeting(role) and not meeting.is_held
     version = parse_version(request.POST.get("meeting_version"))
     if version is None or version != meeting.updated_at:
         if _is_exact_repeat(meeting, request.POST):
@@ -373,16 +434,24 @@ def meeting_save(request, pk):
 
     forms = _bind(meeting, _reviewed_actions(meeting), can_edit=True, data=request.POST)
     form, agreed, carried = forms
-    if form.is_valid() and agreed.is_valid() and carried.is_valid():
+    valid = form.is_valid() and agreed.is_valid() and carried.is_valid()
+    if valid and hold and page_would_be_blank(meeting, agreed, carried):
+        form.add_error(
+            None,
+            "A blank meeting can't be marked as held. Add at least one note or action, "
+            "then save again.",
+        )
+        valid = False
+    if valid:
         # One save is one transaction: never the notes without the actions.
         try:
-            save_meeting_page(meeting, version, form, agreed, carried)
+            save_meeting_page(meeting, version, form, agreed, carried, hold=hold)
         except (MeetingChanged, OperationalError):
             # OperationalError: e.g. Postgres aborting this transaction as a
             # deadlock victim against a concurrent writer. The save rolled back
             # either way, so hand the text back rather than a 500 that loses it.
             return _stale_save(request, meeting)
-        messages.success(request, "Meeting saved.")
+        messages.success(request, _saved_message(hold))
         return redirect("line_management:meeting_detail", pk=meeting.pk)
 
     messages.error(request, "Please correct the errors below.")
@@ -397,8 +466,11 @@ def _is_exact_repeat(meeting, post):
     blank rows count as a repeat only if they are exactly the newest actions now
     stored on this meeting, in order — i.e. the previous submit of this same page
     created them. Anything else (a changed note, a different rating, a delete
-    tick, a row that no longer validates) is not a repeat.
+    tick, a row that no longer validates) is not a repeat. Nor is a "Save and
+    mark as held" of a meeting not yet Held: folding it would drop the hold.
     """
+    if HOLD_FIELD in post and not meeting.is_held:
+        return False
     form, agreed, carried = _bind(meeting, _reviewed_actions(meeting), can_edit=True, data=post)
     if not all(f.is_valid() for f in (form, agreed, carried)):
         return False
@@ -423,17 +495,78 @@ _NOTE_LABELS = {
 }
 
 
-def _handback_labels(post, meeting):
+def _saved_message(held):
+    return "Meeting saved and marked as held." if held else "Meeting saved."
+
+
+def _fold(request, duplicate):
+    """Answer a repeated create with the meeting it repeats (nothing new is saved).
+
+    No second "Meeting saved." — the first submit already queued one, as in
+    ``meeting_save``'s repeat path.
+    """
+    return redirect("line_management:meeting_detail", pk=duplicate.pk)
+
+
+def _refuse_out_of_date(request, member):
+    # A page from before actions were rows (e.g. open across a deploy) posts
+    # fields no form reads any more; a bound re-render would drop them.
+    return render_save_blocked(
+        request,
+        heading="This page is out of date",
+        explanation=(
+            "The meeting form changed after you opened this page, so nothing was saved. "
+            "Everything you typed is below: start the new meeting again and add it back in."
+        ),
+        back_url=reverse("line_management:meeting_new", args=[member.pk]),
+        back_label="Start the meeting again",
+        labels={
+            **_NOTE_LABELS,
+            "actions_from_last_meeting": "Actions from the last meeting",
+            "actions_from_meeting": "Actions from this meeting",
+        },
+    )
+
+
+def _member_actions(member):
+    """``member``'s actions: used only to label a refused create's ratings by wording.
+
+    Only managers and superusers reach the create view, and they may read these.
+    """
+    return MeetingAction.objects.filter(agreed_at__staff=member)
+
+
+def _refuse_preparing(request, preparing, member):
+    """Refuse a create while another meeting for the person is being prepared.
+
+    The text is handed back rather than merged in: the other meeting may hold
+    different notes and ratings, and guessing which wins would lose some. Only
+    managers and superusers reach the create view, so linking to it is safe.
+    """
+    return render_save_blocked(
+        request,
+        heading="A meeting is already being prepared",
+        explanation=(
+            "A meeting for this person is already being prepared — possibly by you, in "
+            "another tab or window — so nothing from this page was saved. Everything you "
+            "typed is below: open the meeting being prepared and add anything that is "
+            "missing from it."
+        ),
+        back_url=reverse("line_management:meeting_detail", args=[preparing.pk]),
+        back_label="Open the meeting being prepared",
+        labels=_handback_labels(request.POST, _member_actions(member)),
+    )
+
+
+def _handback_labels(post, actions):
     """Readable labels for the hand-back page.
 
     Reads action wording from the record, which the recovery page otherwise never
-    does — safe here because only a viewer who may edit this meeting gets this
-    far. Wording is looked up only among *this* meeting's reviewed actions, so a
-    crafted id labels nothing.
+    does — safe here because only a viewer who may edit the meeting gets this far.
+    Wording is looked up only among ``actions`` (this meeting's reviewed actions,
+    or for a refused create the person's own), so a crafted id labels nothing.
     """
-    wording = {
-        str(pk): text for pk, text in meeting.reviewed_actions.values_list("pk", "description")
-    }
+    wording = {str(pk): text for pk, text in actions.values_list("pk", "description")}
     labels = dict(_NOTE_LABELS)
     for key in post:
         parts = key.split("-")
@@ -455,16 +588,19 @@ def _handback_labels(post, meeting):
 
 
 def _stale_save(request, meeting):
+    explanation = (
+        "Someone saved this meeting after you opened it — possibly you, in another tab "
+        "or window. To avoid overwriting their changes, nothing from this page was saved. "
+        "Everything you typed is below: open the meeting again to see the latest version, "
+        "then add your changes back in."
+    )
+    if HOLD_FIELD in request.POST:
+        explanation += " It was not marked as held."
     return render_save_blocked(
         request,
         heading="This meeting was changed while you were working",
-        explanation=(
-            "Someone saved this meeting after you opened it — possibly you, in another tab "
-            "or window. To avoid overwriting their changes, nothing from this page was saved. "
-            "Everything you typed is below: open the meeting again to see the latest version, "
-            "then add your changes back in."
-        ),
+        explanation=explanation,
         back_url=reverse("line_management:meeting_detail", args=[meeting.pk]),
         back_label="Open the latest version of this meeting",
-        labels=_handback_labels(request.POST, meeting),
+        labels=_handback_labels(request.POST, meeting.reviewed_actions.all()),
     )

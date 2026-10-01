@@ -9,7 +9,11 @@
   </header>
 
   <div class="actions">
-    <a class="button" href="{% url 'line_management:meeting_new' staff_pk=member.pk %}">New meeting</a>
+    {% if preparing %}
+      <a class="button" href="{% url 'line_management:meeting_detail' pk=preparing.pk %}">Continue the meeting being prepared</a>
+    {% else %}
+      <a class="button" href="{% url 'line_management:meeting_new' staff_pk=member.pk %}">New meeting</a>
+    {% endif %}
   </div>
 
   {% if meetings %}
@@ -17,6 +21,7 @@
       <thead>
         <tr>
           <th>Meeting date</th>
+          <th>Status</th>
           <th>Recorded by</th>
           <th></th>
         </tr>
@@ -25,6 +30,7 @@
         {% for meeting in meetings %}
           <tr>
             <td>{{ meeting.meeting_date }}</td>
+            <td>{% include "line_management/_state_badge.html" %}</td>
             <td>{{ meeting.created_by_email|default:"—" }}</td>
             <td><a class="button button--small" href="{% url 'line_management:meeting_detail' pk=meeting.pk %}">Open</a></td>
           </tr>

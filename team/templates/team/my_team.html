@@ -16,7 +16,7 @@
           <th>Department</th>
           <th>Your role</th>
           <th>Goal Setting and Review</th>
-          <th>Line meetings</th>
+          <th>Held meetings</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -47,6 +47,7 @@
               {% if row.is_manager %}
                 <div class="cell-stack">
                   <span class="cell-meta">{{ row.meeting_count }}{% if row.last_meeting %} · last {{ row.last_meeting }}{% endif %}</span>
+                  {% if row.preparing %}<span class="status-badge status-badge--preparing">Being prepared</span>{% endif %}
                   <a class="button button--small" href="{% url 'line_management:staff_meetings' staff_pk=row.member.pk %}">Open</a>
                 </div>
               {% else %}
@@ -55,7 +56,11 @@
             </td>
             <td>
               {% if row.is_manager %}
-                <a class="button button--small" href="{% url 'line_management:meeting_new' staff_pk=row.member.pk %}">New line meeting</a>
+                {% if row.preparing %}
+                  <a class="button button--small" href="{% url 'line_management:meeting_detail' pk=row.preparing.pk %}">Continue meeting</a>
+                {% else %}
+                  <a class="button button--small" href="{% url 'line_management:meeting_new' staff_pk=row.member.pk %}">New line meeting</a>
+                {% endif %}
               {% endif %}
             </td>
           </tr>

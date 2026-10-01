@@ -153,8 +153,8 @@ class LineMeetingAdminForm(forms.ModelForm):
 @admin.register(LineMeeting)
 class LineMeetingAdmin(SuperuserOnlyDeleteMixin, admin.ModelAdmin):
     form = LineMeetingAdminForm
-    list_display = ("staff", "meeting_date", "created_by_email")
-    list_filter = ("meeting_date",)
+    list_display = ("staff", "meeting_date", "state", "created_by_email")
+    list_filter = ("state", "meeting_date")
     search_fields = ("staff__email", "created_by_email")
     autocomplete_fields = ("staff",)
     date_hierarchy = "meeting_date"
@@ -163,10 +163,18 @@ class LineMeetingAdmin(SuperuserOnlyDeleteMixin, admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         # An action spans two meetings (agreed at / reviewed in), so moving a saved
         # meeting to another person would put one person's actions, ratings and
-        # comments on another person's record.
+        # comments on another person's record. ``state`` is fixed once saved: there
+        # is no un-hold (a later meeting may already have pinned its actions), and
+        # holding is done on the meeting page, under its version check.
         if obj is not None:
-            return ("staff",)
+            return ("staff", "state")
         return ()
+
+    def get_changeform_initial_data(self, request):
+        # A meeting entered in the admin is almost always a record of one already
+        # held. Editable on add only, so choosing "Being prepared" for someone who
+        # already has one is a form error from the unique constraint, not a 500.
+        return {"state": LineMeeting.State.HELD, **super().get_changeform_initial_data(request)}
 
     def save_model(self, request, obj, form, change):
         # Inline action edits change what the reviewing meetings' pages show, so

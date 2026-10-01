@@ -36,7 +36,13 @@ class Command(BaseCommand):
             MeetingAction.objects.filter(agreed_at=OuterRef("pk"))
         ) | Exists(MeetingAction.objects.filter(reviewed_in=OuterRef("pk")))
 
-        empties = LineMeeting.objects.filter(blank).exclude(has_actions).select_related("staff")
+        # Held only: a meeting being prepared is work in progress (its page may
+        # be open), and every legacy blank this command exists for is Held.
+        empties = (
+            LineMeeting.objects.filter(blank, state=LineMeeting.State.HELD)
+            .exclude(has_actions)
+            .select_related("staff")
+        )
         count = empties.count()
 
         if not count:

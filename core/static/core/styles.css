@@ -416,6 +416,9 @@ input[type="password"]:focus {
   background: var(--colour-primary-dark);
 }
 
+/* The note under a meeting's "Save and mark as held" button. */
+.hold-hint { text-align: right; margin-top: 8px; }
+
 /* Lists (home page) */
 
 .home-intro {
@@ -2587,3 +2590,8 @@ summary:focus-visible {
   text-align: center;
   white-space: nowrap;
 }
+
+/* Line meetings: being prepared vs held. */
+.status-badge--preparing { background: var(--rag-blue); color: var(--colour-white); }
+.status-badge--held { background: var(--rag-green); color: var(--colour-white); }
+.page-title .status-badge { margin-left: 10px; vertical-align: middle; }

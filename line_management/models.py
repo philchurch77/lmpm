@@ -28,10 +28,27 @@ class LineMeeting(models.Model):
     note is always attributed to its original author.
     """
 
+    class State(models.TextChoices):
+        # Being prepared: started, not yet held. At most one per report.
+        PREPARING = "PREPARING", "Being prepared"
+        # Held: the line manager has marked it held. There is no way back — a
+        # later meeting may already have pinned its actions.
+        HELD = "HELD", "Held"
+
     staff = models.ForeignKey(
         StaffMember,
         on_delete=models.PROTECT,
         related_name="line_meetings",
+    )
+    # The app always writes ``state`` (Python default PREPARING). The database
+    # default is HELD for writers that do not: the previous release, still
+    # serving while a deploy migrates, inserts without the column, and every
+    # meeting it creates is one that took place.
+    state = models.CharField(
+        max_length=9,
+        choices=State.choices,
+        default=State.PREPARING,
+        db_default=State.HELD,
     )
     # Who created this record. Provenance/display only; stamped server-side from
     # the acting user and never used for authorization.
@@ -64,10 +81,33 @@ class LineMeeting(models.Model):
         indexes = [
             models.Index(fields=["staff", "-meeting_date"]),
         ]
+        constraints = [
+            # Also the backstop for two racing creates (the repeat-submission
+            # guard in the view handles the ordinary double-click).
+            models.UniqueConstraint(
+                fields=["staff"],
+                condition=models.Q(state="PREPARING"),
+                name="linemeeting_one_preparing_per_staff",
+                violation_error_message="This person already has a meeting being prepared.",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(state__in=["PREPARING", "HELD"]),
+                name="linemeeting_state_valid",
+            ),
+        ]
+
+    @property
+    def is_held(self) -> bool:
+        return self.state == self.State.HELD
 
     def save(self, *args, **kwargs):
         self.created_by_email = self.created_by_email.strip().lower()
         super().save(*args, **kwargs)
+
+    @property
+    def has_notes(self) -> bool:
+        """Whether any note section (``NOTE_FIELDS``) holds non-whitespace text."""
+        return any((getattr(self, f) or "").strip() for f in self.NOTE_FIELDS)
 
     @property
     def is_empty(self) -> bool:
@@ -79,7 +119,7 @@ class LineMeeting(models.Model):
         blanks. ``NOTE_FIELDS`` is deliberately not extended with the actions —
         the importer's ``source_row_hash`` is computed from it.
         """
-        if any((getattr(self, f) or "").strip() for f in self.NOTE_FIELDS):
+        if self.has_notes:
             return False
         if self.pk is None:
             return True

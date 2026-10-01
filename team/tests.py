@@ -145,8 +145,8 @@ class MyTeamAnnotationTests(TestCase):
 
     def test_managed_row_carries_meeting_count_and_last_date(self):
         report = make_staff("report@oxlip.test", line_manager_email=self.boss_email)
-        LineMeeting.objects.create(staff=report, meeting_date=date(2026, 1, 10))
-        LineMeeting.objects.create(staff=report, meeting_date=date(2026, 3, 2))
+        LineMeeting.objects.create(staff=report, meeting_date=date(2026, 1, 10), state=LineMeeting.State.HELD)
+        LineMeeting.objects.create(staff=report, meeting_date=date(2026, 3, 2), state=LineMeeting.State.HELD)
         self.client.force_login(self.boss_user)
         row = self.client.get(self.url).context["rows"][0]
         self.assertEqual(row["meeting_count"], 2)
@@ -160,3 +160,32 @@ class MyTeamAnnotationTests(TestCase):
         row = self.client.get(self.url).context["rows"][0]
         self.assertEqual(row["meeting_count"], 0)
         self.assertIsNone(row["last_meeting"])
+
+    # Catches My Team counting a meeting still being prepared as held, or losing the
+    # link to continue it.
+    def test_team_counts_only_held_meetings(self):
+        report = make_staff("report@oxlip.test", line_manager_email=self.boss_email)
+        LineMeeting.objects.create(staff=report, meeting_date=date(2026, 1, 10), state=LineMeeting.State.HELD)
+        preparing = LineMeeting.objects.create(
+            staff=report, meeting_date=date(2026, 3, 2), state=LineMeeting.State.PREPARING
+        )
+        self.client.force_login(self.boss_user)
+        row = self.client.get(self.url).context["rows"][0]
+        self.assertEqual(row["meeting_count"], 1)
+        self.assertEqual(row["last_meeting"], date(2026, 1, 10))
+        self.assertEqual(row["preparing"], preparing)
+
+    # Catches the "Continue meeting" lookup leaking another manager's report's
+    # meeting being prepared onto this manager's page.
+    def test_team_preparing_link_never_shows_another_managers_meeting(self):
+        mine = make_staff("mine@oxlip.test", line_manager_email=self.boss_email)
+        theirs = make_staff("theirs@oxlip.test", line_manager_email="other@oxlip.test")
+        other_prep = LineMeeting.objects.create(
+            staff=theirs, meeting_date=date(2026, 3, 2), state=LineMeeting.State.PREPARING
+        )
+        self.client.force_login(self.boss_user)
+        response = self.client.get(self.url)
+        rows = response.context["rows"]
+        self.assertEqual([r["member"] for r in rows], [mine])
+        self.assertIsNone(rows[0]["preparing"])
+        self.assertNotContains(response, reverse("line_management:meeting_detail", args=[other_prep.pk]))

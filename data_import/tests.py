@@ -1344,26 +1344,183 @@ class LineMeetingImportVersionTests(TestCase):
         self.client.force_login(self.super_user)
         self.staff = make_staff("report@oxlip.test")
 
-    def _upload_and_confirm(self):
+    def _upload_and_confirm(self, created_by=""):
         upload_and_get_batch(
             self.client,
             "line-meetings",
-            make_csv("staff_email,meeting_date,main_matters", "report@oxlip.test,2026-01-15,Discussed timetable."),
+            make_csv(
+                "staff_email,meeting_date,main_matters,created_by_email",
+                f"report@oxlip.test,2026-01-15,Discussed timetable.,{created_by}",
+            ),
         )
         batch = ImportBatch.objects.filter(import_type=ImportType.LINE_MEETINGS).latest("uploaded_at")
         confirm_batch(batch)
         return batch
 
-    # Catches the import UPDATE path (a bulk .update(), bypassing auto_now) leaving updated_at alone.
+    # Catches the import UPDATE path (a bulk .update(), bypassing auto_now) leaving updated_at
+    # alone when it does change the meeting. (Leg 3: notes are never rewritten on this path, so
+    # the only thing it can change is created_by_email.)
     def test_import_update_on_hash_match_advances_updated_at(self):
         from datetime import datetime, timezone as dt_timezone
 
-        self._upload_and_confirm()
+        self._upload_and_confirm(created_by="first@oxlip.test")
         meeting = LineMeeting.objects.get(staff=self.staff)
         old = datetime(2020, 1, 1, 9, 0, 0, tzinfo=dt_timezone.utc)
         LineMeeting.objects.filter(pk=meeting.pk).update(updated_at=old)
 
-        batch = self._upload_and_confirm()
+        batch = self._upload_and_confirm(created_by="second@oxlip.test")
         self.assertEqual(batch.rows.get(row_number=1).outcome, ImportRow.Outcome.UPDATE)
         self.assertEqual(LineMeeting.objects.filter(staff=self.staff).count(), 1)
-        self.assertNotEqual(LineMeeting.objects.get(pk=meeting.pk).updated_at, old)
+        stored = LineMeeting.objects.get(pk=meeting.pk)
+        self.assertEqual(stored.created_by_email, "second@oxlip.test")
+        self.assertNotEqual(stored.updated_at, old)
+
+    # Catches an unchanged re-import invalidating every open meeting page (a spurious 409).
+    def test_identical_reimport_does_not_advance_updated_at(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        self._upload_and_confirm(created_by="first@oxlip.test")
+        meeting = LineMeeting.objects.get(staff=self.staff)
+        old = datetime(2020, 1, 1, 9, 0, 0, tzinfo=dt_timezone.utc)
+        LineMeeting.objects.filter(pk=meeting.pk).update(updated_at=old)
+
+        batch = self._upload_and_confirm(created_by="first@oxlip.test")
+        self.assertEqual(batch.rows.get(row_number=1).outcome, ImportRow.Outcome.UPDATE)
+        self.assertEqual(LineMeeting.objects.get(pk=meeting.pk).updated_at, old)
+
+
+class LineMeetingImportHeldTests(TestCase):
+    """Leg 3: imported meetings are Held; a re-import never overwrites an in-app
+    edit; a create that would strand unreviewed actions is refused."""
+
+    HEADER = "staff_email,meeting_date,main_matters,created_by_email"
+    ROW = "report@oxlip.test,2026-01-15,Discussed timetable.,{created_by}"
+
+    def setUp(self):
+        self.super_user = make_user("admin@oxlip.test", is_superuser=True)
+        self.client.force_login(self.super_user)
+        self.staff = make_staff("report@oxlip.test")
+
+    def _upload(self, *rows, header=None):
+        response = upload_and_get_batch(self.client, "line-meetings", make_csv(header or self.HEADER, *rows))
+        self.assertEqual(response.status_code, 200)
+        batch = ImportBatch.objects.filter(import_type=ImportType.LINE_MEETINGS).latest("uploaded_at")
+        return response, batch
+
+    def _import_once(self, created_by="first@oxlip.test"):
+        _response, batch = self._upload(self.ROW.format(created_by=created_by))
+        confirm_batch(batch)
+        return LineMeeting.objects.get(staff=self.staff)
+
+    def _edit_in_app(self, meeting, text):
+        LineMeeting.objects.filter(pk=meeting.pk).update(main_matters=text)
+
+    # Catches imported meetings landing as "Being prepared" (and so uncounted, and
+    # blocking the manager's next meeting).
+    def test_import_creates_held_meeting(self):
+        meeting = self._import_once()
+        self.assertEqual(meeting.state, LineMeeting.State.HELD)
+
+    # Catches a re-upload of the same export overwriting notes a manager has since
+    # edited in the app.
+    def test_reimport_skips_meeting_edited_in_app_and_keeps_edit(self):
+        from data_import.services import EDITED_IN_APP
+
+        meeting = self._import_once()
+        edit = "Discussed timetable.\r\nAdded later in the app — “keep” ✅"
+        self._edit_in_app(meeting, edit)
+
+        _response, batch = self._upload(self.ROW.format(created_by="second@oxlip.test"))
+        row = batch.rows.get(row_number=1)
+        self.assertEqual(row.outcome, ImportRow.Outcome.SKIP)
+        self.assertEqual(row.error_message, EDITED_IN_APP)
+        confirm_batch(batch)
+
+        stored = LineMeeting.objects.get(staff=self.staff)
+        self.assertEqual(stored.pk, meeting.pk)
+        self.assertEqual(stored.main_matters, edit)
+        self.assertEqual(stored.created_by_email, "first@oxlip.test")
+
+    # Catches the compare-and-swap refusing a re-import of a meeting nobody touched.
+    def test_reimport_of_untouched_meeting_still_updates(self):
+        meeting = self._import_once()
+        _response, batch = self._upload(self.ROW.format(created_by="second@oxlip.test"))
+        self.assertEqual(batch.rows.get(row_number=1).outcome, ImportRow.Outcome.UPDATE)
+        confirm_batch(batch)
+        row = batch.rows.get(row_number=1)
+        self.assertEqual(row.outcome, ImportRow.Outcome.UPDATE)
+        stored = LineMeeting.objects.get(staff=self.staff)
+        self.assertEqual(stored.pk, meeting.pk)
+        self.assertEqual(stored.main_matters, "Discussed timetable.")
+        self.assertEqual(stored.created_by_email, "second@oxlip.test")
+
+    # Catches the skip being recorded but not shown, so the importer reads it as done.
+    def test_import_skip_reason_shown_on_preview(self):
+        from data_import.services import EDITED_IN_APP
+
+        meeting = self._import_once()
+        self._edit_in_app(meeting, "Changed in the app")
+        response, batch = self._upload(self.ROW.format(created_by=""))
+        self.assertContains(response, EDITED_IN_APP)
+        preview = self.client.get(reverse("data_import:preview", args=[batch.pk]))
+        self.assertContains(preview, EDITED_IN_APP)
+
+    # Catches an imported meeting dated on/after one with unreviewed actions becoming
+    # the carry-forward source, so those actions never come up for review.
+    def test_import_refuses_meeting_that_would_strand_unreviewed_actions(self):
+        from data_import.services import STRANDS_ACTIONS
+        from line_management.models import MeetingAction
+
+        source = LineMeeting.objects.create(
+            staff=self.staff, meeting_date="2026-01-10", main_matters="In app", state=LineMeeting.State.HELD
+        )
+        action = MeetingAction.objects.create(agreed_at=source, description="Open action")
+
+        _response, batch = self._upload(
+            "report@oxlip.test,2026-01-10,Same day import.,",
+            "report@oxlip.test,2026-02-01,Later import.,",
+            "report@oxlip.test,2026-01-05,Earlier import.,",
+        )
+        outcomes = {r.row_number: (r.outcome, r.error_message) for r in batch.rows.all()}
+        self.assertEqual(outcomes[1], (ImportRow.Outcome.SKIP, STRANDS_ACTIONS))
+        self.assertEqual(outcomes[2], (ImportRow.Outcome.SKIP, STRANDS_ACTIONS))
+        self.assertEqual(outcomes[3][0], ImportRow.Outcome.CREATE)
+        confirm_batch(batch)
+
+        self.assertEqual(
+            sorted(LineMeeting.objects.filter(staff=self.staff).values_list("main_matters", flat=True)),
+            ["Earlier import.", "In app"],
+        )
+        action.refresh_from_db()
+        self.assertIsNone(action.reviewed_in_id)
+
+    # Catches an in-app edit made between the preview and the confirm being
+    # overwritten — at confirm (re-validation) and in apply itself (the CAS).
+    def test_reimport_edit_between_preview_and_confirm_is_skipped(self):
+        from data_import.services import (
+            EDITED_IN_APP,
+            MeetingEditedSinceImport,
+            apply_line_meeting_row,
+            validate_line_meeting_row,
+        )
+
+        meeting = self._import_once()
+        _response, batch = self._upload(self.ROW.format(created_by="second@oxlip.test"))
+        row = batch.rows.get(row_number=1)
+        self.assertEqual(row.outcome, ImportRow.Outcome.UPDATE)
+        resolved_at_preview = validate_line_meeting_row(row.raw_json, "admin@oxlip.test").resolved
+
+        edit = "Edited after the preview — “mine” \U0001f600"
+        self._edit_in_app(meeting, edit)
+
+        # The apply step on its own refuses, even with what validated before the edit.
+        with self.assertRaises(MeetingEditedSinceImport):
+            apply_line_meeting_row(row.raw_json, resolved_at_preview)
+
+        confirm_batch(batch)
+        row.refresh_from_db()
+        self.assertEqual(row.outcome, ImportRow.Outcome.SKIP)
+        self.assertEqual(row.error_message, EDITED_IN_APP)
+        stored = LineMeeting.objects.get(pk=meeting.pk)
+        self.assertEqual(stored.main_matters, edit)
+        self.assertEqual(stored.created_by_email, "first@oxlip.test")

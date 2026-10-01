@@ -1,4 +1,5 @@
 - [Owner-vs-viewer pattern & Goal.type_label N+1 watch point](pattern_appraisals_owner_vs_viewer.md) — appraisals app's owner-driven display pattern; per-row FK walk in formsets is an N+1 risk
 - [One-off data-correction command house style](pattern_oneoff_data_correction_commands.md) — report-by-default/--apply/compare-and-swap convention; placeholder wording risk to recheck later
 - [Line-meeting actions leg 1 review](pattern_line_meeting_actions_leg1.md) — MeetingAction/pinning design; findings raised so they are not re-raised blindly
+- [Line-meeting hold/state leg 3 review](pattern_line_meeting_hold_leg3.md) — PREPARING/HELD design; findings raised, shared helpers' homes
 - [Line-meeting version token leg 2 review](pattern_line_meeting_version_token_leg2.md) — updated_at CAS design; what was verified and what was raised
