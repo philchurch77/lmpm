@@ -1,2 +1,2 @@
-- [Line meeting enforcement](project_line_meeting_enforcement.md) — chokepoints, action formsets, leg-2 403-before-409, leg-3 hold gate + state writers, probe pattern
+- [Line meeting enforcement](project_line_meeting_enforcement.md) — chokepoints, action formsets, leg-2 403-before-409, leg-3 hold gate, leg-4 edit_scope + prepare chokepoint, probe pattern
 - [Appraisal enforcement](project_appraisal_enforcement.md) — get_appraisal_or_403 chokepoint, RoleGatedForm disabling, owner-not-viewer variant rule, audited-clean items

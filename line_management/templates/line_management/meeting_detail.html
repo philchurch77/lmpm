@@ -1,19 +1,21 @@
 {% extends "core/base.html" %}
 
-{% block title %}{% if is_new %}New line meeting{% else %}Line meeting{% endif %} — {{ member.email }}{% endblock %}
+{% block title %}{% if is_report_preparing %}Prepare your next line meeting{% elif is_new %}New line meeting{% else %}Line meeting{% endif %} — {{ member.email }}{% endblock %}
 
 {% block content %}
   <header class="page-header">
-    <h1 class="page-title">{% if is_new %}New line meeting{% else %}Line meeting {% include "line_management/_state_badge.html" %}{% endif %}</h1>
+    <h1 class="page-title">{% if is_report_preparing %}Prepare your next line meeting{% elif is_new %}New line meeting{% else %}Line meeting{% endif %}{% if not is_new %} {% include "line_management/_state_badge.html" %}{% endif %}</h1>
     <p class="appraisal-sub">
       {{ member.email }}
-      {% if not is_new %} · {{ meeting.meeting_date|date:"j M Y" }}{% if meeting.created_by_email %} · Recorded by {{ meeting.created_by_email }}{% endif %}{% endif %}
+      {% if not is_new %} · {{ meeting.meeting_date|date:"j M Y" }}{% if meeting.created_by_email %} · Started by {{ meeting.created_by_email }}{% endif %}{% endif %}
       {% if role == 'manager' %} · You line-manage this person{% elif role == 'report' %} · This is your record{% endif %}
     </p>
   </header>
 
-  {% if not can_edit %}
-    <ul class="messages"><li class="info">{% if meeting and not meeting.is_held %}Your line manager is still preparing this meeting, so it may be incomplete. {% endif %}This record is read-only. Only the current line manager can edit it.</li></ul>
+  {% if is_report_preparing %}
+    <ul class="messages"><li class="info">You can prepare this meeting: rate the actions from last time, then add upcoming events, main matters to discuss and actions from this meeting. Your line manager completes the record and marks it held; after that it is read-only to you.</li></ul>
+  {% elif not can_edit %}
+    <ul class="messages"><li class="info">{% if meeting.is_held %}This meeting has been held. {% endif %}The record is read-only; only your line manager can change it.</li></ul>
   {% endif %}
 
   <form method="post" action="{{ form_action }}" data-warn-unsaved>
@@ -28,6 +30,7 @@
       <div class="reflection-card-body">
         <div class="field-row">
           <label for="{{ form.meeting_date.id_for_label }}">Date of meeting</label>
+          {% if is_report_preparing %}<p class="muted">The date you expect it to take place; your line manager can change it.</p>{% endif %}
           {{ form.meeting_date }}
           {% if form.meeting_date.errors %}<div class="field-errors">{{ form.meeting_date.errors }}</div>{% endif %}
         </div>
@@ -50,8 +53,21 @@
       <div class="reflection-card-header">Rotation update</div>
       <div class="reflection-card-body">
         <div class="field-row">
-          <label for="{{ form.rotation_update.id_for_label }}">{{ rotation_guidance }}</label>
-          {{ form.rotation_update }}
+          {% if is_report_preparing %}
+            {% comment %}
+              The field is disabled for the report (forms.REPORT_FIELDS), which is what
+              keeps it unwritable; this only shows it as text instead of a dead box.
+            {% endcomment %}
+            {% if form.rotation_update.value %}
+              <p class="muted">Completed by your line manager:</p>
+              <div class="descriptor-text">{{ form.rotation_update.value|linebreaksbr }}</div>
+            {% else %}
+              <p class="muted">Your line manager will complete this at the meeting.</p>
+            {% endif %}
+          {% else %}
+            <label for="{{ form.rotation_update.id_for_label }}">{{ rotation_guidance }}</label>
+            {{ form.rotation_update }}
+          {% endif %}
         </div>
       </div>
     </div>
@@ -78,6 +94,7 @@
         <p class="muted hold-hint" id="hold-hint">Mark the meeting as held once it has taken place. You can still edit the notes afterwards, but it can’t go back to being prepared.</p>
       {% else %}
         <div class="actions"><button type="submit">Save</button></div>
+        {% if is_report_preparing %}<p class="muted hold-hint">Your line manager will see this when they open the meeting.</p>{% endif %}
       {% endif %}
     {% endif %}
   </form>

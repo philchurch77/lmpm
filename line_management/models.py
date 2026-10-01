@@ -16,8 +16,9 @@ class LineMeeting(models.Model):
     """A single line-management meeting record for one staff member.
 
     Unlike an appraisal (one per teacher per year), a staff member has many
-    dated line meetings over time. The managed person views their own records
-    read-only; the staff member's **current** line manager edits them.
+    dated line meetings over time. The managed person (the report) may prepare
+    their own meeting while it is being prepared (``permissions.edit_scope``) and
+    reads it once Held; the staff member's **current** line manager edits everything.
 
     Authorization (see ``permissions.meeting_role``) is a **live** lookup
     against ``staff.line_manager_email``, not a snapshot. This is a deliberate

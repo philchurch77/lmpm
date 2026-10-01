@@ -131,11 +131,13 @@ class MeetingRoleMatrixTests(TestCase):
         response = self.client.get(self.detail_url)
         self.assertEqual(response.status_code, 200)
 
-    # Catches the read-only boundary failing: a report must never write.
-    def test_report_cannot_save_own_meeting(self):
+    # Catches the Held boundary failing: a report must never write to a held meeting.
+    # (Leg 4: they keep their role, so it is a 409 hand-back of their own text, not a 403.)
+    def test_report_cannot_save_own_held_meeting(self):
         self.client.force_login(self.report_user)
         response = self.client.post(self.save_url, self._save_payload())
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "saved by test", status_code=409)
         self.meeting.refresh_from_db()
         self.assertNotEqual(self.meeting.main_matters, "saved by test")
 
@@ -762,8 +764,8 @@ class MeetingActionIsolationTests(TestCase):
         self.assertEqual(MeetingAction.objects.count(), before)
         self.assertFalse(MeetingAction.objects.filter(review_comment="ghost row").exists())
 
-    # Catches the report writing action rows on their own read-only record.
-    def test_report_posting_action_rows_to_own_meeting_gets_403_and_rows_unchanged(self):
+    # Catches the report writing action rows on their own held (read-only) record.
+    def test_report_posting_action_rows_to_own_held_meeting_gets_409_and_rows_unchanged(self):
         own = make_action(self.m1, "Agreed by manager")
         later = make_meeting(self.r1, meeting_date=date(2026, 1, 20))
         carried = make_action(self.m1, "Carried one", reviewed_in=later)
@@ -774,11 +776,11 @@ class MeetingActionIsolationTests(TestCase):
         payload = meeting_payload(
             main_matters="R1 notes", **agreed_rows([(own, "REPORT EDIT", True)], new=["REPORT NEW"])
         )
-        self.assertEqual(self.client.post(self.save_url, versioned(payload, self.m1)).status_code, 403)
+        self.assertEqual(self.client.post(self.save_url, versioned(payload, self.m1)).status_code, 409)
 
         payload = meeting_payload(**carried_rows([(carried, "GREEN", "report rating")]))
         later_save = reverse("line_management:meeting_save", args=[later.pk])
-        self.assertEqual(self.client.post(later_save, versioned(payload, later)).status_code, 403)
+        self.assertEqual(self.client.post(later_save, versioned(payload, later)).status_code, 409)
 
         self.assertEqual([snapshot(own), snapshot(carried)], before)
         self.assertEqual(MeetingAction.objects.count(), count)
@@ -1584,6 +1586,7 @@ from .services import (  # noqa: E402
     save_meeting_page,
     touch_meetings,
 )
+from .permissions import SCOPE_ALL  # noqa: E402
 from .views import _bind  # noqa: E402
 
 # Every meeting is aged to this stamp in setUp, so "the version moved" never
@@ -1790,20 +1793,33 @@ class VersionAccessOrderTests(_StalePageMixin, TestCase):
                 self.assertNotContains(response, "Outgoing typed this", status_code=403)
         self.assertEqual(db_state(), before)
 
-    # Catches a stranger or the read-only report reaching the version check at all.
-    def test_stranger_and_report_get_403_whatever_the_stamp(self):
+    # Catches a stranger reaching the version check at all.
+    def test_stranger_gets_403_whatever_the_stamp(self):
         stranger = make_user("stranger@oxlip.test")
         make_staff("stranger@oxlip.test")
         before = db_state()
-        for user in (stranger, self.report_user):
-            for stamp in (self.version(), "2000-01-01T00:00:00+00:00", None):
-                with self.subTest(user=user.email, stamp=stamp):
-                    self.client.force_login(user)
-                    response = self.client.post(
-                        self.save_url, self.page(stamp, main_matters="Not theirs to write")
-                    )
-                    self.assertEqual(response.status_code, 403)
-                    self.assertNotContains(response, "Not theirs to write", status_code=403)
+        self.client.force_login(stranger)
+        for stamp in (self.version(), "2000-01-01T00:00:00+00:00", None):
+            with self.subTest(stamp=stamp):
+                response = self.client.post(
+                    self.save_url, self.page(stamp, main_matters="Not theirs to write")
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertNotContains(response, "Not theirs to write", status_code=403)
+        self.assertEqual(db_state(), before)
+
+    # Catches the report writing to their own held meeting, whatever the stamp: they get
+    # their own text back (409) and nothing is written.
+    def test_report_on_held_meeting_gets_409_whatever_the_stamp(self):
+        before = db_state()
+        self.client.force_login(self.report_user)
+        for stamp in (self.version(), "2000-01-01T00:00:00+00:00", None):
+            with self.subTest(stamp=stamp):
+                response = self.client.post(
+                    self.save_url, self.page(stamp, main_matters="Typed after it was held")
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertContains(response, "Typed after it was held", status_code=409)
         self.assertEqual(db_state(), before)
 
     # Catches a crafted carried-N-id making the hand-back label show another report's action wording.
@@ -1851,7 +1867,7 @@ class SaveMeetingPageServiceTests(TestCase):
 
     def _valid_forms(self, data):
         meeting = LineMeeting.objects.get(pk=self.meeting.pk)
-        forms = _bind(meeting, meeting.reviewed_actions.all(), can_edit=True, data=data)
+        forms = _bind(meeting, meeting.reviewed_actions.all(), scope=SCOPE_ALL, data=data)
         for f in forms:
             self.assertTrue(f.is_valid(), getattr(f, "errors", None))
         return meeting, forms
@@ -2366,15 +2382,17 @@ class HoldAccessControlTests(_Leg3Mixin, TestCase):
     nothing returns a Held meeting to Being prepared."""
 
     # Catches the hold gate being removed: a report marking their own meeting held.
-    def test_report_cannot_mark_meeting_held(self):
+    # (Leg 4: the report may edit a meeting being prepared, so their save lands — but
+    # the posted hold is ignored and the meeting stays being prepared.)
+    def test_report_posting_hold_on_save_saves_but_stays_preparing(self):
         meeting = self.preparing()
         self.client.force_login(self.report_user)
         response = self.client.post(
             self.save_url(meeting), self.page(meeting, hold=True, main_matters="Report wrote this")
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 302)
         self.assertEqual(state_of(meeting), PREPARING)
-        self.assertEqual(notes_of(meeting), "Prepared so far")
+        self.assertEqual(notes_of(meeting), "Report wrote this")
 
     # Catches IDOR on the hold: an unrelated user holding a meeting by guessing its pk.
     def test_stranger_cannot_mark_meeting_held(self):
@@ -2722,3 +2740,594 @@ class PurgePreparingTests(TestCase):
         call_command("purge_empty_line_meetings")
         self.assertFalse(LineMeeting.objects.filter(pk=held_empty.pk).exists())
         self.assertTrue(LineMeeting.objects.filter(pk=preparing_empty.pk).exists())
+
+
+# ---------------------------------------------------------------------------
+# Leg 4 of docs/chart/line-meeting-preparation.md: the report prepares their own
+# next meeting while it is Being prepared. Access control first (Gauntlet stage 3).
+# ---------------------------------------------------------------------------
+
+from django.conf import settings  # noqa: E402
+from django.shortcuts import resolve_url  # noqa: E402
+
+from .permissions import SCOPE_PREPARE  # noqa: E402
+from .permissions import get_meeting_or_403 as real_get_meeting_or_403  # noqa: E402
+
+# Text that has to survive every path untouched: curly quotes, accents, emoji, CRLF.
+AWKWARD = "Café naïve — “quoted” ‘single’ \U0001f600 ✅\r\nSecond line"
+
+
+class _Leg4Mixin(_Leg3Mixin):
+    """Leg 3's cast (manager, report, stranger, superuser), signed in as the report."""
+
+    def setUp(self):
+        super().setUp()
+        self.prepare_new_url = reverse("line_management:prepare_new")
+        self.prepare_create_url = reverse("line_management:prepare_create")
+        self.my_meetings_url = reverse("line_management:my_meetings")
+        self.staff_meetings_url = reverse("line_management:staff_meetings", args=[self.report.pk])
+        self.client.force_login(self.report_user)
+
+    def prepare(self, meeting_date="2026-02-01", carried=(), agreed=(), hold=False, url=None, **notes):
+        """POST the report's "prepare your next meeting" page."""
+        payload = meeting_payload(meeting_date=meeting_date, **notes)
+        payload.update(carried_rows(carried))
+        payload.update(agreed_rows(new=agreed))
+        if hold:
+            payload["hold"] = "1"
+        return self.client.post(url or self.prepare_create_url, payload)
+
+    def detail_url(self, meeting):
+        return reverse("line_management:meeting_detail", args=[meeting.pk])
+
+    def back_link(self, url):
+        # The hand-back page's own "open ..." button (the nav has plain links only).
+        return f'href="{url}" target="_blank"'
+
+
+class ReportPrepareAccessTests(_Leg4Mixin, TestCase):
+    """Gauntlet stage 3: the prepare views act only on the viewer's own record,
+    and preparing widens nothing else the report can reach."""
+
+    # Catches the prepare views missing @login_required (an anonymous POST creating a meeting).
+    def test_anonymous_prepare_redirects_to_login(self):
+        self.client.logout()
+        login = resolve_url(settings.LOGIN_URL)
+        get = self.client.get(self.prepare_new_url)
+        post = self.prepare(main_matters="Anonymous")
+        for response in (get, post):
+            self.assertEqual(response.status_code, 302)
+            self.assertTrue(response["Location"].startswith(login), response["Location"])
+        self.assertFalse(LineMeeting.objects.exists())
+
+    # Catches a user with no StaffMember (even a superuser) reaching the prepare
+    # workflow and creating a meeting attached to nobody, or to someone else.
+    def test_user_without_staff_member_gets_403_on_prepare_new_and_create(self):
+        for user in (make_user("nostaff@oxlip.test"), self.super_user):
+            with self.subTest(user=user.email):
+                self.client.force_login(user)
+                self.assertEqual(self.client.get(self.prepare_new_url).status_code, 403)
+                self.assertEqual(self.prepare(main_matters="No staff record").status_code, 403)
+        self.assertFalse(LineMeeting.objects.exists())
+
+    # Catches someone with no line manager starting a meeting nobody could ever hold.
+    # (The create POST is the "lost their line manager while typing" 409 hand-back by
+    # design — it cannot tell the two apart — so it refuses without a 403.)
+    def test_staff_with_no_line_manager_gets_403_on_prepare_new_and_nothing_saved_on_create(self):
+        self.client.force_login(self.manager_user)  # boss@ has no line manager
+        self.assertEqual(self.client.get(self.prepare_new_url).status_code, 403)
+        response = self.prepare(main_matters="Nobody can hold this")
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "Nobody can hold this", status_code=409)
+        self.assertFalse(LineMeeting.objects.exists())
+
+    # Catches a self-managed record (line_manager_email == own email, any case)
+    # letting someone prepare a meeting only a superuser could ever hold.
+    def test_staff_whose_line_manager_is_themselves_cannot_prepare(self):
+        user = make_user("self@oxlip.test")
+        own = make_staff("self@oxlip.test")
+        StaffMember.objects.filter(pk=own.pk).update(line_manager_email="Self@OXLIP.test")
+        self.client.force_login(user)
+        self.assertEqual(self.client.get(self.prepare_new_url).status_code, 403)
+        self.assertNotEqual(self.prepare(main_matters="Self-managed").status_code, 302)
+        self.assertFalse(LineMeeting.objects.filter(staff=own).exists())
+        self.assertNotContains(self.client.get(self.my_meetings_url), f'href="{self.prepare_new_url}"')
+
+    # Catches IDOR on the prepare views: a posted or query-string staff id choosing
+    # whose record the meeting is created on.
+    def test_prepare_create_ignores_posted_staff_and_creates_for_viewer_only(self):
+        other = make_staff("other@oxlip.test", line_manager_email=self.manager_email)
+        url = f"{self.prepare_create_url}?staff={other.pk}&staff_pk={other.pk}"
+        response = self.prepare(
+            url=url, staff=str(other.pk), staff_pk=str(other.pk), main_matters="Mine only"
+        )
+        self.assertEqual(response.status_code, 302)
+        meeting = LineMeeting.objects.get(main_matters="Mine only")
+        self.assertEqual(meeting.staff, self.report)
+        self.assertEqual(meeting.created_by_email, "report@oxlip.test")
+        self.assertFalse(LineMeeting.objects.filter(staff=other).exists())
+
+    # Catches leg 4 widening the manager-only views: the report using the manager's
+    # start/list URLs on their own record (which would allow holding on create).
+    def test_report_still_403_on_manager_new_and_create_urls(self):
+        self.assertEqual(
+            self.client.get(reverse("line_management:meeting_new", args=[self.report.pk])).status_code, 403
+        )
+        self.assertEqual(self.create(main_matters="Via the manager URL", hold=True).status_code, 403)
+        self.assertEqual(self.client.get(self.staff_meetings_url).status_code, 403)
+        self.assertFalse(LineMeeting.objects.exists())
+
+    # Catches the prepare scope leaking across reports: one report reading or writing
+    # a colleague's meeting being prepared by guessing its pk.
+    def test_report_cannot_open_or_save_another_reports_meeting_being_prepared(self):
+        other = make_staff("other@oxlip.test", line_manager_email=self.manager_email)
+        theirs = make_meeting(other, state=PREPARING, meeting_date=date(2026, 2, 1))
+        LineMeeting.objects.filter(pk=theirs.pk).update(main_matters="Other report's private prep")
+        before = db_state()
+
+        response = self.client.get(self.detail_url(theirs))
+        self.assertEqual(response.status_code, 403)
+        self.assertNotContains(response, "private prep", status_code=403)
+        response = self.client.post(self.save_url(theirs), self.page(theirs, main_matters="Overwritten"))
+        self.assertEqual(response.status_code, 403)
+        self.assertNotContains(response, "private prep", status_code=403)
+        self.assertEqual(db_state(), before)
+
+    # Catches a crafted carried-action id letting the report rate (or read the wording
+    # of) another person's action, on the prepare create and on a save.
+    def test_report_crafted_carried_id_cannot_rate_another_persons_action(self):
+        own_held = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        own = make_action(own_held, "Own action")
+        other = make_staff("other@oxlip.test", line_manager_email=self.manager_email)
+        other_held = make_meeting(other, meeting_date=date(2026, 1, 10))
+        other_prep = make_meeting(other, state=PREPARING, meeting_date=date(2026, 2, 1))
+        foreign = make_action(other_held, "Other person's secret action", reviewed_in=other_prep)
+        foreign_before = snapshot(foreign)
+
+        for carried in ([(own, "", ""), (foreign, "RED", "crafted")], [(foreign, "RED", "crafted")]):
+            with self.subTest(create=len(carried)):
+                response = self.prepare(carried=carried, main_matters="Prep")
+                self.assertNotEqual(response.status_code, 302)
+                self.assertNotContains(response, "secret action", status_code=response.status_code)
+        self.assertFalse(LineMeeting.objects.filter(staff=self.report, state=PREPARING).exists())
+
+        mine = make_meeting(self.report, state=PREPARING, meeting_date=date(2026, 2, 1))
+        MeetingAction.objects.filter(pk=own.pk).update(reviewed_in=mine)
+        own_before = snapshot(own)
+        response = self.client.post(
+            self.save_url(mine), self.page(mine, main_matters="Prep", carried=[(foreign, "RED", "crafted")])
+        )
+        self.assertNotEqual(response.status_code, 302)
+        self.assertNotContains(response, "secret action", status_code=response.status_code)
+        self.assertEqual(snapshot(foreign), foreign_before)
+        self.assertEqual(snapshot(own), own_before)
+        self.assertEqual(notes_of(mine), "")
+
+    # Catches the REPORT_FIELDS allowlist failing: the report writing the line
+    # manager's Rotation update by posting it, on create and on save.
+    def test_report_crafted_rotation_update_is_ignored_on_create_and_save(self):
+        response = self.prepare(main_matters="Prep", rotation_update="Report crafted rotation")
+        self.assertEqual(response.status_code, 302)
+        meeting = self.newest()
+        self.assertEqual(meeting.rotation_update, "")
+
+        LineMeeting.objects.filter(pk=meeting.pk).update(rotation_update="Manager's rotation")
+        response = self.client.post(
+            self.save_url(meeting),
+            self.page(meeting, main_matters="Prep 2", rotation_update="Crafted again"),
+        )
+        self.assertEqual(response.status_code, 302)
+        meeting.refresh_from_db()
+        self.assertEqual(meeting.rotation_update, "Manager's rotation")
+        self.assertEqual(meeting.main_matters, "Prep 2")
+
+    # Catches the report's save clearing the manager's Rotation update — a browser
+    # posts no key for a disabled field, so a full-scope bind would read it as blank.
+    def test_report_save_keeps_managers_rotation_update_intact(self):
+        meeting = self.preparing()
+        rotation = "Manager’s R2 notes — “staffing” café\r\nline two \U0001f600"
+        LineMeeting.objects.filter(pk=meeting.pk).update(rotation_update=rotation)
+        for i, posted in enumerate(("<absent>", "Crafted by report", "")):
+            with self.subTest(posted=posted):
+                payload = self.page(meeting, main_matters=f"Report case {i}")
+                if posted == "<absent>":
+                    del payload["rotation_update"]
+                else:
+                    payload["rotation_update"] = posted
+                self.assertEqual(self.client.post(self.save_url(meeting), payload).status_code, 302)
+                meeting.refresh_from_db()
+                self.assertEqual(meeting.rotation_update, rotation)
+                self.assertEqual(meeting.main_matters, f"Report case {i}")
+
+    # Catches the hold gate missing on the shared create path: the report creating
+    # their own meeting already Held by posting "hold".
+    def test_report_posting_hold_on_create_creates_preparing_not_held(self):
+        response = self.prepare(main_matters="Prep with a crafted hold", hold=True)
+        self.assertEqual(response.status_code, 302)
+        meeting = LineMeeting.objects.get(staff=self.report)
+        self.assertEqual(meeting.state, PREPARING)
+        self.assertEqual(meeting.main_matters, "Prep with a crafted hold")
+
+
+class ReportHeldBoundaryTests(_Leg4Mixin, TestCase):
+    """Once Held, the record is read-only to the report — however the save races."""
+
+    # Catches a report's save landing on a meeting the manager held while they typed,
+    # or the refusal discarding their text.
+    def test_report_save_after_meeting_held_gets_409_handback_and_nothing_written(self):
+        meeting = self.preparing()
+        age_meetings(meeting)
+        v0 = meeting_version(LineMeeting.objects.get(pk=meeting.pk))
+        self.client.force_login(self.manager_user)
+        self.assertEqual(
+            self.client.post(self.save_url(meeting), self.page(meeting, hold=True, main_matters="Held")).status_code,
+            302,
+        )
+        before = db_state()
+
+        self.client.force_login(self.report_user)
+        response = self.client.post(
+            self.save_url(meeting), self.page(meeting, stamp=v0, main_matters=AWKWARD, new=["Late action"])
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "This meeting has been marked as held", status_code=409)
+        self.assertContains(response, escape(AWKWARD), status_code=409)
+        self.assertContains(response, "Late action", status_code=409)
+        self.assertContains(response, self.back_link(self.detail_url(meeting)), status_code=409)
+        self.assertNotContains(response, self.staff_meetings_url, status_code=409)
+        self.assertEqual(db_state(), before)
+
+    # Catches the report's write resting only on the version check: a Held meeting at
+    # an unchanged version must still refuse the report's conditional UPDATE.
+    def test_report_save_racing_hold_cannot_write_to_held_meeting(self):
+        prepared = self.preparing()
+        age_meetings(prepared)
+        meeting = LineMeeting.objects.get(pk=prepared.pk)
+        data = self.page(meeting, stamp=None, main_matters="Racing report text", new=["Racing action"])
+        forms = _bind(meeting, meeting.reviewed_actions.all(), scope=SCOPE_PREPARE, data=data)
+        for f in forms:
+            self.assertTrue(f.is_valid(), getattr(f, "errors", None))
+        LineMeeting.objects.filter(pk=meeting.pk).update(state=HELD)  # held, version not advanced
+        before = db_state()
+        with self.assertRaises(MeetingChanged):
+            save_meeting_page(meeting, meeting.updated_at, *forms, as_report=True)
+        self.assertEqual(db_state(), before)
+
+    # Catches the view answering that raced refusal with the generic stale page (or a
+    # 500) instead of the held hand-back with the report's text.
+    def test_report_save_when_held_between_check_and_update_gets_held_handback(self):
+        meeting = self.preparing()
+        age_meetings(meeting)
+        stamp = stamp_of(meeting)
+
+        def load_then_hold(request, pk):
+            result = real_get_meeting_or_403(request, pk)
+            LineMeeting.objects.filter(pk=pk).update(state=HELD)  # no version advance
+            return result
+
+        payload = self.page(meeting, main_matters=AWKWARD, new=["Raced action"])
+        with mock.patch("line_management.views.get_meeting_or_403", side_effect=load_then_hold):
+            response = self.client.post(self.save_url(meeting), payload)
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "This meeting has been marked as held", status_code=409)
+        self.assertContains(response, escape(AWKWARD), status_code=409)
+        self.assertContains(response, "Raced action", status_code=409)
+        self.assertEqual(notes_of(meeting), "Prepared so far")
+        self.assertFalse(MeetingAction.objects.filter(description="Raced action").exists())
+        self.assertEqual(stamp_of(meeting), stamp)
+
+    # Catches a Held meeting rendering editable to the report (or carrying a version
+    # stamp that would let a crafted save through the version check).
+    def test_report_page_on_held_meeting_has_no_version_stamp_and_disabled_fields(self):
+        held = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        LineMeeting.objects.filter(pk=held.pk).update(main_matters="Held notes")
+        make_action(held, "Agreed at the held meeting")
+        earlier = make_meeting(self.report, meeting_date=date(2025, 12, 1))
+        make_action(earlier, "Reviewed at the held meeting", reviewed_in=held, rag="GREEN")
+        response = self.client.get(self.detail_url(held))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'name="meeting_version"')
+        self.assertNotContains(response, '<button type="submit"')
+        self.assertFalse(response.context["can_edit"])
+        self.assertFalse(response.context["can_hold"])
+        self.assertFalse(response.context["is_report_preparing"])
+        self.assertTrue(all(f.disabled for f in response.context["form"].fields.values()))
+        agreed = response.context["agreed_formset"]
+        self.assertEqual(len(agreed.forms), 1)  # no blank rows to add actions
+        for f in agreed.forms:
+            self.assertNotIn("DELETE", f.fields)
+            # "id"/"agreed_at" are the formset's hidden keys; the FK is forced from the parent.
+            self.assertTrue(f.fields["description"].disabled)
+        self.assertEqual(len(response.context["carried_formset"].forms), 1)
+        self.assertTrue(all(
+            fld.disabled for f in response.context["carried_formset"].forms for fld in
+            (f.fields["rag"], f.fields["review_comment"])
+        ))
+
+
+class ReportPrepareInheritanceTests(_Leg4Mixin, TestCase):
+    """The live line-manager rule holds for a meeting the report started."""
+
+    def _report_prepares(self):
+        self.assertEqual(self.prepare(main_matters="Report's prep", agreed=["Report's action"]).status_code, 302)
+        return self.newest()
+
+    def _repoint(self, new_manager_email):
+        StaffMember.objects.filter(pk=self.report.pk).update(line_manager_email=new_manager_email)
+
+    # Catches a report-started meeting being stranded when the line manager changes:
+    # the successor must be able to complete and hold it.
+    def test_successor_manager_inherits_meeting_being_prepared_by_report(self):
+        meeting = self._report_prepares()
+        action = MeetingAction.objects.get(description="Report's action")
+        successor = make_user("successor@oxlip.test")
+        make_staff("successor@oxlip.test")
+        self._repoint("successor@oxlip.test")
+
+        self.client.force_login(successor)
+        detail = self.client.get(self.detail_url(meeting))
+        self.assertEqual(detail.status_code, 200)
+        self.assertTrue(detail.context["can_edit"])
+        self.assertTrue(detail.context["can_hold"])
+        response = self.client.post(self.save_url(meeting), self.page(
+            meeting, hold=True, main_matters="Report's prep", rotation_update="Successor's rotation",
+            existing=[(action, "Report's action", False)],
+        ))
+        self.assertEqual(response.status_code, 302)
+        meeting.refresh_from_db()
+        self.assertEqual(meeting.state, HELD)
+        self.assertEqual(meeting.main_matters, "Report's prep")
+        self.assertEqual(meeting.rotation_update, "Successor's rotation")
+        self.assertEqual(meeting.created_by_email, "report@oxlip.test")
+
+    # Catches the outgoing manager keeping access to a meeting the report is preparing.
+    def test_outgoing_manager_gets_403_on_report_prepared_meeting(self):
+        meeting = self._report_prepares()
+        make_staff("successor@oxlip.test")
+        self._repoint("successor@oxlip.test")
+        before = db_state()
+
+        self.client.force_login(self.manager_user)
+        response = self.client.get(self.detail_url(meeting))
+        self.assertEqual(response.status_code, 403)
+        self.assertNotContains(response, "Report's prep", status_code=403)
+        response = self.client.post(
+            self.save_url(meeting), self.page(meeting, hold=True, main_matters="Outgoing overwrite")
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(db_state(), before)
+
+
+class ReportPrepareWorkflowTests(_Leg4Mixin, TestCase):
+    """The report's create/edit flow produces the right records and loses nothing."""
+
+    # Catches the report's create skipping carry-forward (or pinning from the wrong
+    # meeting), so last time's actions are never reviewed.
+    def test_report_prepare_pins_last_held_meetings_actions(self):
+        held = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a, b = make_action(held, "Chase supplier A"), make_action(held, "Chase supplier B")
+        page = self.client.get(self.prepare_new_url)
+        self.assertEqual(page.status_code, 200)
+        self.assertTrue(page.context["is_report_preparing"])
+        self.assertContains(page, "Chase supplier A")
+        self.assertEqual(LineMeeting.objects.count(), 1)  # GET persists nothing
+
+        comment = "Started — “half” done"
+        response = self.prepare(carried=[(a, "AMBER", comment), (b, "", "")], main_matters="Report prep")
+        self.assertEqual(response.status_code, 302)
+        meeting = self.newest()
+        self.assertEqual(meeting.state, PREPARING)
+        self.assertEqual(meeting.created_by_email, "report@oxlip.test")
+        a.refresh_from_db()
+        b.refresh_from_db()
+        self.assertEqual((a.reviewed_in_id, a.rag, a.review_comment), (meeting.pk, "AMBER", comment))
+        self.assertEqual((b.reviewed_in_id, b.rag), (meeting.pk, ""))
+
+    # Catches the manager's page dropping (or a save overwriting) the ratings and notes
+    # the report prepared, through to the hold.
+    def test_report_ratings_survive_manager_save_and_hold(self):
+        held = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(held, "Chase supplier")
+        comment = "Report’s view — “nearly” \U0001f600"
+        self.prepare(carried=[(a, "AMBER", comment)], agreed=["Report's action"], main_matters="Report prep")
+        meeting = self.newest()
+        report_action = MeetingAction.objects.get(description="Report's action")
+
+        self.client.force_login(self.manager_user)
+        detail = self.client.get(self.detail_url(meeting))
+        carried_form = detail.context["carried_formset"].forms[0]
+        self.assertEqual((carried_form.initial["rag"], carried_form.initial["review_comment"]), ("AMBER", comment))
+        self.assertEqual(detail.context["form"].initial["main_matters"], "Report prep")
+
+        response = self.client.post(self.save_url(meeting), self.page(
+            meeting, hold=True, main_matters="Report prep", rotation_update="R1 update",
+            existing=[(report_action, "Report's action", False)], carried=[(a, "AMBER", comment)],
+        ))
+        self.assertEqual(response.status_code, 302)
+        meeting.refresh_from_db()
+        a.refresh_from_db()
+        self.assertEqual(meeting.state, HELD)
+        self.assertEqual((meeting.main_matters, meeting.rotation_update), ("Report prep", "R1 update"))
+        self.assertEqual((a.rag, a.review_comment), ("AMBER", comment))
+        self.assertTrue(MeetingAction.objects.filter(pk=report_action.pk, agreed_at=meeting).exists())
+
+    # Catches the report's action rights being narrower than agreed: they may reword
+    # or delete any action agreed at the meeting being prepared, the manager's too.
+    def test_report_can_reword_and_delete_actions_agreed_at_meeting_being_prepared(self):
+        meeting = self.preparing()
+        by_manager = make_action(meeting, "Manager typed this")
+        by_report = make_action(meeting, "Report typed this")
+        response = self.client.post(self.save_url(meeting), self.page(
+            meeting, main_matters="Prepared so far",
+            existing=[(by_manager, "Manager typed this — clarified", False), (by_report, "Report typed this", True)],
+            new=["Report's new action"],
+        ))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            list(meeting.agreed_actions.order_by("pk").values_list("description", flat=True)),
+            ["Manager typed this — clarified", "Report's new action"],
+        )
+        self.assertFalse(MeetingAction.objects.filter(pk=by_report.pk).exists())
+
+    # Catches a back-dated report prepare taking the being-prepared slot, or the
+    # refusal discarding what was typed.
+    def test_report_back_dated_prepare_is_refused_with_text_kept(self):
+        make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        response = self.prepare("2026-01-01", main_matters=AWKWARD, agreed=["Back-dated action ✅"])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "before your last held meeting")
+        self.assertContains(response, escape(AWKWARD))
+        self.assertContains(response, escape("Back-dated action ✅"))
+        self.assertFalse(LineMeeting.objects.filter(state=PREPARING).exists())
+        self.assertEqual(LineMeeting.objects.count(), 1)
+
+    # Catches "Prepare your next meeting" offering a blank form while one is already
+    # being prepared (the report's create would then be refused).
+    def test_prepare_new_redirects_to_meeting_already_being_prepared(self):
+        meeting = self.preparing()
+        response = self.client.get(self.prepare_new_url)
+        self.assertRedirects(response, self.detail_url(meeting))
+        self.assertTrue(self.client.get(self.detail_url(meeting)).context["is_report_preparing"])
+        self.assertEqual(LineMeeting.objects.count(), 1)
+
+    # Catches the report's refused create losing their text, leaking the other
+    # meeting's notes, or linking them to the manager-only staff list (a 403).
+    def test_report_create_while_manager_preparing_hands_text_back_409_with_report_links(self):
+        self.assertEqual(self.client.get(self.prepare_new_url).status_code, 200)
+        meeting = self.preparing()  # the manager starts one while the report types
+        response = self.prepare(main_matters=AWKWARD, agreed=["Report action ✅"])
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, escape(AWKWARD), status_code=409)
+        self.assertContains(response, escape("Report action ✅"), status_code=409)
+        self.assertContains(response, self.back_link(self.detail_url(meeting)), status_code=409)
+        self.assertNotContains(response, "/line-management/staff/", status_code=409)
+        self.assertNotContains(response, "Prepared so far", status_code=409)
+        self.assertEqual(LineMeeting.objects.count(), 1)
+        self.assertFalse(MeetingAction.objects.exists())
+        self.assertEqual(notes_of(meeting), "Prepared so far")
+
+    # Catches a double-clicked prepare answering the second click with a 409.
+    def test_report_double_click_prepare_folds(self):
+        first = self.prepare(main_matters="Clicked twice", agreed=["Once"])
+        second = self.prepare(main_matters="Clicked twice", agreed=["Once"])
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(first["Location"], second["Location"])
+        self.assertEqual(LineMeeting.objects.get(staff=self.report).state, PREPARING)
+        self.assertEqual(MeetingAction.objects.count(), 1)
+
+    # Catches the repeat check binding the report's POST at full scope: with no
+    # Rotation key posted, a non-blank Rotation reads as changed and a harmless
+    # double-click becomes a 409.
+    def test_report_double_click_save_folds_when_rotation_has_text(self):
+        meeting = self.preparing()
+        LineMeeting.objects.filter(pk=meeting.pk).update(rotation_update="Manager’s rotation notes")
+        age_meetings(meeting)
+        v0 = meeting_version(LineMeeting.objects.get(pk=meeting.pk))
+        payload = self.page(meeting, stamp=v0, main_matters="Report saved once", new=["Report once"])
+        del payload["rotation_update"]  # a browser never posts a disabled field
+        first = self.client.post(self.save_url(meeting), payload)
+        second = self.client.post(self.save_url(meeting), payload)
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(second["Location"], self.detail_url(meeting))
+        meeting.refresh_from_db()
+        self.assertEqual(meeting.rotation_update, "Manager’s rotation notes")
+        self.assertEqual(meeting.main_matters, "Report saved once")
+        self.assertEqual(list(meeting.agreed_actions.values_list("description", flat=True)), ["Report once"])
+
+    # Catches the report's stale page overwriting the manager's save, or the refusal
+    # dropping their text or pointing them at a page they cannot open.
+    def test_report_stale_page_after_manager_save_is_409_handback(self):
+        meeting = self.preparing()
+        age_meetings(meeting)
+        v0 = meeting_version(LineMeeting.objects.get(pk=meeting.pk))
+        self.client.force_login(self.manager_user)
+        self.assertEqual(self.client.post(self.save_url(meeting), self.page(
+            meeting, main_matters="Manager's edit", rotation_update="Manager's rotation",
+        )).status_code, 302)
+        before = db_state()
+
+        self.client.force_login(self.report_user)
+        response = self.client.post(self.save_url(meeting), self.page(meeting, stamp=v0, main_matters=AWKWARD))
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "This meeting was changed while you were working", status_code=409)
+        self.assertContains(response, escape(AWKWARD), status_code=409)
+        self.assertContains(response, self.back_link(self.detail_url(meeting)), status_code=409)
+        self.assertNotContains(response, "/line-management/staff/", status_code=409)
+        self.assertEqual(db_state(), before)
+
+    # Catches a report whose line manager is cleared mid-typing losing everything
+    # behind a bare 403 on their own record.
+    def test_report_loses_line_manager_mid_typing_gets_text_back_not_403(self):
+        self.assertEqual(self.client.get(self.prepare_new_url).status_code, 200)
+        StaffMember.objects.filter(pk=self.report.pk).update(line_manager_email="")
+        response = self.prepare(main_matters=AWKWARD, upcoming="Diary dates", agreed=["Kept action"])
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, escape(AWKWARD), status_code=409)
+        self.assertContains(response, "Diary dates", status_code=409)
+        self.assertContains(response, "Kept action", status_code=409)
+        self.assertContains(response, self.back_link(self.my_meetings_url), status_code=409)
+        self.assertNotContains(response, "/line-management/staff/", status_code=409)
+        self.assertFalse(LineMeeting.objects.exists())
+
+    # Catches the "Prepare" button showing to someone whose click would 403, or
+    # missing for someone who may prepare.
+    def test_my_meetings_offers_prepare_only_when_a_line_manager_is_recorded(self):
+        link = f'href="{self.prepare_new_url}"'
+        self.assertContains(self.client.get(self.my_meetings_url), link)
+
+        self.client.force_login(self.manager_user)  # no line manager recorded
+        response = self.client.get(self.my_meetings_url)
+        self.assertNotContains(response, link)
+        self.assertContains(response, "No line manager is recorded")
+
+    # Catches my_meetings offering a fresh prepare (which only redirects) instead of
+    # the meeting already being prepared — and not offering it again once held.
+    def test_my_meetings_offers_continue_when_a_meeting_is_being_prepared(self):
+        meeting = self.preparing()
+        response = self.client.get(self.my_meetings_url)
+        self.assertContains(response, "Continue preparing your next meeting")
+        self.assertContains(response, f'href="{self.detail_url(meeting)}"')
+        self.assertNotContains(response, f'href="{self.prepare_new_url}"')
+
+        LineMeeting.objects.filter(pk=meeting.pk).update(state=HELD)
+        response = self.client.get(self.my_meetings_url)
+        self.assertNotContains(response, "Continue preparing your next meeting")
+        self.assertContains(response, f'href="{self.prepare_new_url}"')
+
+    # Catches any loss on the report's path (article 6): long text with CRLF, curly
+    # quotes, accents and emoji must survive create, the edit form, an unchanged
+    # re-save, and an invalid submit.
+    def test_report_text_round_trips_emoji_crlf_and_curly_quotes(self):
+        long_text = "\r\n\r\n".join([AWKWARD] * 40)
+        upcoming = "Diary: Tuesday — “INSET” \U0001f389\r\nThen Friday"
+        action_text = "Report’s action — “by Friday” \U0001f680\r\nsecond line"
+        self.assertEqual(
+            self.prepare(main_matters=long_text, upcoming=upcoming, agreed=[action_text]).status_code, 302
+        )
+        meeting = self.newest()
+        action = MeetingAction.objects.get(agreed_at=meeting)
+
+        def assert_stored():
+            meeting.refresh_from_db()
+            action.refresh_from_db()
+            self.assertEqual(meeting.main_matters, long_text)
+            self.assertEqual(meeting.upcoming, upcoming)
+            self.assertEqual(action.description, action_text)
+
+        assert_stored()
+        page = self.client.get(self.detail_url(meeting))
+        for text in (long_text, upcoming, action_text):
+            self.assertContains(page, escape(text))
+
+        unchanged = dict(main_matters=long_text, upcoming=upcoming, existing=[(action, action_text, False)])
+        self.assertEqual(self.client.post(self.save_url(meeting), self.page(meeting, **unchanged)).status_code, 302)
+        assert_stored()
+
+        edited = long_text + "\r\nEdited \U0001f600"
+        response = self.client.post(self.save_url(meeting), self.page(
+            meeting, meeting_date="not-a-date", main_matters=edited, upcoming=upcoming,
+            existing=[(action, action_text, False)],
+        ))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, escape(edited))
+        assert_stored()

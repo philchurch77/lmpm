@@ -8,7 +8,7 @@
     <p class="appraisal-sub">{{ member.email }}{% if member.department %} · {{ member.department }}{% endif %}</p>
   </header>
 
-  <div class="actions">
+  <div class="actions actions--row">
     {% if preparing %}
       <a class="button" href="{% url 'line_management:meeting_detail' pk=preparing.pk %}">Continue the meeting being prepared</a>
     {% else %}
@@ -22,7 +22,7 @@
         <tr>
           <th>Meeting date</th>
           <th>Status</th>
-          <th>Recorded by</th>
+          <th>Started by</th>
           <th></th>
         </tr>
       </thead>

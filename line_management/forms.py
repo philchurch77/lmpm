@@ -6,9 +6,11 @@ formsets: ``AgreedActionFormSet`` (actions agreed at this meeting) and
 ``CarriedActionFormSet`` (actions carried in from the last meeting, RAG-rated
 here).
 
-Only the current line manager may edit: when ``can_edit`` is False every field is
-set ``disabled`` so Django ignores any submitted value (the real security
-boundary, not template hiding).
+The current line manager edits everything; the report, while their meeting is
+being prepared, edits only ``REPORT_FIELDS`` plus the actions. Fields outside the
+viewer's scope are set ``disabled`` so Django ignores any submitted value (the
+real security boundary, not template hiding), and ``save_meeting_page`` writes
+only enabled fields.
 
 The legacy free-text ``actions_from_last_meeting`` / ``actions_from_meeting``
 fields are deliberately not on any form, so no save can ever overwrite them; the
@@ -73,10 +75,19 @@ class LineMeetingForm(forms.ModelForm):
             ),
         }
 
-    def __init__(self, *args, can_edit=False, **kwargs):
+    # What the report may edit while preparing. An allowlist, so a field added
+    # later is the line manager's alone until someone decides otherwise. The
+    # Rotation update is the line manager's.
+    REPORT_FIELDS = ("meeting_date", "upcoming", "main_matters")
+
+    def __init__(self, *args, can_edit=False, report_scope=False, **kwargs):
         super().__init__(*args, **kwargs)
         if not can_edit:
             _disable_all(self)
+        elif report_scope:
+            for name, field in self.fields.items():
+                if name not in self.REPORT_FIELDS:
+                    field.disabled = True
 
     def clean_meeting_date(self):
         """A saved meeting's date may not move so that its actions leave the review cycle.

@@ -2,4 +2,5 @@
 - [One-off data-correction command house style](pattern_oneoff_data_correction_commands.md) — report-by-default/--apply/compare-and-swap convention; placeholder wording risk to recheck later
 - [Line-meeting actions leg 1 review](pattern_line_meeting_actions_leg1.md) — MeetingAction/pinning design; findings raised so they are not re-raised blindly
 - [Line-meeting hold/state leg 3 review](pattern_line_meeting_hold_leg3.md) — PREPARING/HELD design; findings raised, shared helpers' homes
+- [Line-meeting report prepares leg 4 review](pattern_line_meeting_report_leg4.md) — edit_scope/_StartUrls/shared _create; findings raised
 - [Line-meeting version token leg 2 review](pattern_line_meeting_version_token_leg2.md) — updated_at CAS design; what was verified and what was raised

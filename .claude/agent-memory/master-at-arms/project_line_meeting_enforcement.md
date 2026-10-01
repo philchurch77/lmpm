@@ -31,3 +31,10 @@ Leg 3 Held/Preparing state (audited 2026-10-01, uncommitted at the time):
 - Dashboards: `services.held_meeting_summary()` changes annotations only; row scoping still `line_managed_staff` (team) / `_require_superuser` (overview).
 - Probed with an inline `manage.py shell -c "$PROBE"` (heredoc into a shell var, create_test_db/destroy_test_db) — no file written. Report/stranger hold -> 403; crafted `state=PREPARING` on a Held meeting -> ignored.
 - Leg-3 access tests were not yet in the suite at audit time (hold role gate, un-hold, refuse_preparing no-leak); check whether added.
+
+Leg 4 report-prepares (audited 2026-10-01, uncommitted at the time):
+- `permissions.edit_scope(role, meeting)` -> SCOPE_ALL / SCOPE_PREPARE (report, not Held) / SCOPE_NONE; every `views._bind` takes `scope`. `LineMeetingForm(report_scope=True)` disables all but `REPORT_FIELDS` (allowlist: date, upcoming, main_matters). `save_meeting_page` writes only non-disabled fields, and `as_report=True` adds `state=PREPARING` to the CAS WHERE.
+- Report start views `prepare_new` / `prepare_create` (pk-less) go through `get_own_staff_to_prepare_or_403` -> `may_start_preparing` (blank or self line_manager_email -> 403; superuser without StaffMember -> 403). Shared workflow `_new`/`_create`; `hold` gated by `can_hold_meeting(role)` before anything reads it.
+- `meeting_save` order now: get_meeting_or_403 (403) -> scope NONE: report -> 409 `_held_while_preparing` (POST echo + labels from that meeting's reviewed_actions only), others 403 -> hold gate -> version 409.
+- Probed (inline shell -c probe, `read -r -d '' X <<'EOF'` form; the `$(cat <<EOF)` form broke on long scripts): crafted rotation/hold/state/staff ids, foreign carried/agreed ids on create and save, report on Held (current/stale/missing stamp), outgoing vs successor manager mid-preparation — all held. Crafted foreign agreed id WITH DELETE is silently ignored (Django skips deleted extra forms), without DELETE is a form error; foreign row untouched either way.
+- At audit time there were NO direct tests of the prepare chokepoint, the rotation-disabled rule or report crafted-id isolation — check whether added.

@@ -416,6 +416,14 @@ input[type="password"]:focus {
   background: var(--colour-primary-dark);
 }
 
+/* A page-level link styled as the page's primary action (e.g. "Prepare your next meeting"). */
+.actions a.button {
+  border-color: var(--colour-primary-dark);
+  background: var(--colour-primary);
+  color: var(--colour-white);
+}
+.actions a.button:hover { background: var(--colour-primary-dark); }
+
 /* The note under a meeting's "Save and mark as held" button. */
 .hold-hint { text-align: right; margin-top: 8px; }
 
@@ -2514,6 +2522,7 @@ summary:focus-visible {
 .actions--row {
   justify-content: flex-start;
   margin-top: 12px;
+  margin-bottom: 16px;
 }
 
 .actions button.btn-secondary {

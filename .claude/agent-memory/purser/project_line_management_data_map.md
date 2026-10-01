@@ -1,6 +1,6 @@
 ---
 name: project-line-management-data-map
-description: Line-management stores map - LineMeeting/MeetingAction free text, PROTECT cascades, legacy action prose, formset id-queryset trap, importer overwrite (audited 2026-09-30)
+description: Line-management stores map - LineMeeting/MeetingAction free text, PROTECT cascades, legacy action prose, formset id-queryset trap, importer CAS, legs 1-4 (report edit_scope) audited to 2026-10-01
 metadata:
   type: project
 ---
@@ -28,6 +28,11 @@ Importer UPDATE path now never writes notes: validate SKIPs when stored notes !=
 meeting_create refusals verified by running: preparing-exists 409 echo, back-dated Save bound re-render, IntegrityError race 409 echo; but IntegrityError with no preparing meeting found re-raises (500, text lost). Stale "Save and mark as held" never folds into a non-held meeting (verified). Hand-back for a refused create labels carried ratings by row only (no action wording).
 purge_empty_line_meetings does not filter on state: it lists/deletes an emptied PREPARING meeting (verified dry-run).
 Code was edited mid-audit again (09:47 refactor: helpers moved to services/forms); re-diff before reporting.
+Leg-3 open items since closed (verified 2026-10-01 in leg 4): state has db_default=HELD; purge filters state=HELD; create IntegrityError with no preparing meeting now hands back (409), no 500.
+
+**Leg 4 (report prepares own meeting, audited 2026-10-01, no migration):** edit_scope ALL/PREPARE/NONE threaded through every _bind; report allowlist REPORT_FIELDS = date/upcoming/main_matters, rotation_update disabled for the report. save_meeting_page writes only enabled fields; as_report adds state=PREPARING to the CAS WHERE. Report on Held -> 409 hand-back (_held_while_preparing), not 403. All verified by running: crafted/absent/blank rotation never overwrites; report double-click save and create fold without loss; hold race (with and without version bump) 409 echo; report create refusals (back-dated, invalid, stale carried, out-of-date, preparing exists, IntegrityError both branches) all hand back with report-reachable links; report round trip byte-identical. Accepted decision: report may reword/delete any action agreed at the meeting being prepared (incl. manager-typed). Open: prepare_create 403s and drops text if line_manager_email is cleared mid-typing; no tests for prepare_* or rotation preservation at audit time; no last-edited-by, so either party can blank the other's note text untraceably.
+
+**Probe mechanics:** long heredoc commands fail in the harness (unmatched quote); append the script to the scratchpad in chunks with `cat >>`, run with PYTHONPATH=. and PYTHONIOENCODING=utf-8. Post every carried candidate or the create hits refuse_stale.
 
 **Why:** so the next count starts from the known map.
 **How to apply:** re-verify against current code. Files were edited mid-audit again (cosmetic); check mtimes before reporting. Probe via stdin script with DiscoverRunner.setup_databases(); set PYTHONIOENCODING=utf-8 or emoji output crashes on Windows.

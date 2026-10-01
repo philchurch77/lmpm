@@ -442,11 +442,13 @@ the import cannot touch titles/steps/criteria, and refuses to write inside the r
 
 Digitises recurring 1:1 line-management meetings: a **line manager** (= the `line_manager_email` on
 a person's `StaffMember`) records structured notes for the people they line-manage; the managed
-person (the **report**) views their own records read-only. Mounted at `/line-management/`. Mirrors
+person (the **report**) may prepare their own next meeting and reads it once Held. Mounted at
+`/line-management/`. Mirrors
 the appraisals app's patterns (email identity, role-gated form, `get_*_or_403` IDOR chokepoint,
 `reflection-card` styling, a context processor driving a conditional nav link) but is deliberately
-simpler — one editor, no lock, no field split. A meeting has two states (`PREPARING` "Being
-prepared" / `HELD`); a Held meeting stays editable by the manager — see "Being prepared / Held".
+simpler — no lock, and one field split (the report's preparing scope). A meeting has two states
+(`PREPARING` "Being prepared" / `HELD`); a Held meeting stays editable by the manager — see "Being
+prepared / Held" and "The report prepares their meeting".
 
 ### Model (`line_management/models.py`)
 - `LineMeeting` — **many per staff member** (one per meeting, not one-per-year like `Appraisal`).
@@ -517,10 +519,34 @@ prepared" / `HELD`); a Held meeting stays editable by the manager — see "Being
   whole history** and the previous manager loses access. The single comparison rule lives in
   `is_current_line_manager(member, staff)` (case-insensitive) so it can never drift between the two
   chokepoints.
-- **Only the current line manager (or super) edits**; the report is read-only. `LineMeetingForm`
-  takes `can_edit=` and sets `field.disabled=True` on every field when False (the real security
-  boundary), and `meeting_save` re-checks `can_edit_meeting` and 403s otherwise. There is no
-  lock — the line manager can always edit, Held or not.
+- **What a viewer may edit is one function, `permissions.edit_scope(role, meeting)`**: `SCOPE_ALL`
+  for the current line manager or a superuser (always, Held or not — there is no lock),
+  `SCOPE_PREPARE` for the report on their own meeting while it is being prepared, `SCOPE_NONE`
+  otherwise. Every `_bind` takes it — including the repeat checks, because browsers do not post
+  disabled inputs, so a full-scope bind of the report's POST would read their disabled Rotation
+  update as cleared. Fields outside the scope are built `disabled` (the real security boundary).
+  The predicates behind it are private (`_can_edit_meeting`, `_can_prepare_meeting`) so no view can
+  bypass the scope; `can_hold_meeting` is separate and stays manager/super.
+
+### The report prepares their meeting (leg 4 of `docs/chart/line-meeting-preparation.md`)
+- The head of school confirmed (DPIA, 2026-10-01) that the report may write to their own meeting
+  before it is Held.
+- **Start**: pk-less `prepare/` and `prepare/create/` behind `get_own_staff_to_prepare_or_403` — the
+  person is always the viewer, never anything posted. `why_cannot_prepare` is the one eligibility
+  rule (a StaffMember, a line manager recorded, and not themselves), worded per case, and drives the
+  403, My Line Meetings' muted line, and `prepare_create`'s hand-back when eligibility is lost while
+  typing (their own record, so a conflict, not a probe). The manager's and the report's start views
+  share `_new` / `_create`; a `_Starter` carries the URLs and the wording that differ.
+- **Scope**: `LineMeetingForm.REPORT_FIELDS` (date, Upcoming, Main matters) is an allowlist — a new
+  field is the manager's until decided otherwise. The report may also rate/comment carried actions
+  and add/reword/delete **any** action agreed at the meeting being prepared, including the manager's
+  (the manager has the final say by editing and holding). Never the Rotation update (shown to them
+  as text), never holding (a posted `hold` is ignored).
+- **Held**: read-only to the report. `meeting_save` gate order: no role → **403**; the report on a
+  Held meeting → **409** hand-back of their own POST (`_held_while_preparing`) — they keep their role,
+  so it is a conflict like the appraisal lock; then the hold gate; then the version 409.
+  `save_meeting_page(as_report=True)` also requires `state=PREPARING` in the conditional UPDATE, and
+  a failed save that finds the meeting now Held answers with the held hand-back.
 
 ### Being prepared / Held (leg 3 of `docs/chart/line-meeting-preparation.md`)
 - `LineMeeting.state`: Python default `PREPARING`, **`db_default` `HELD`** — existing rows migrated
@@ -528,8 +554,8 @@ prepared" / `HELD`); a Held meeting stays editable by the manager — see "Being
   migrates; raw SQL) is Held. Partial `UniqueConstraint`: at most one `PREPARING` per staff member.
 - **Holding** is the "Save and mark as held" button (`name="hold"`) on the normal save, so it rides
   `save_meeting_page`'s one conditional UPDATE — a stale page can never hold. "Save" is first in the
-  DOM so Enter never holds. Honoured only if `can_hold_meeting(role)` (kept separate from
-  `can_edit_meeting` so leg 4 can let the report edit but not hold) and the meeting is not Held.
+  DOM so Enter never holds. Honoured only if `can_hold_meeting(role)` (separate from `edit_scope`:
+  the report edits while preparing but never holds) and the meeting is not Held.
   **No un-hold anywhere**: `state` is on no form, and read-only in the admin once saved (a successor
   may already have pinned its actions). A blank page cannot be held (`page_would_be_blank`, shared
   with create).
@@ -544,7 +570,8 @@ prepared" / `HELD`); a Held meeting stays editable by the manager — see "Being
 
 ### Views & nav
 - **Views** (`line_management/views.py`, function-based, `@login_required`, P/R/G): `my_meetings`
-  renders two sections — the viewer's own records (read-only, `staff == viewer`) and
+  renders two sections — the viewer's own records (`staff == viewer`, with "Prepare your next
+  meeting" / "Continue preparing your next meeting") and
   `hosted_meetings` (meetings for everyone the viewer **currently** line-manages, via
   `line_managed_staff`, the same live lookup the access rule uses, so nothing shown is a dead link);
   `staff_meetings` (one report's meetings + "New meeting"); `meeting_new` (GET: renders a blank form,
@@ -738,7 +765,8 @@ bearing for that claim; each was written to close a defect that had actually shi
   > `line_management.meeting_save` deliberately does **not** do this. There, losing the line-management
   > link removes the viewer's role entirely, which is indistinguishable from an IDOR probe, and
   > `ManagerChangeInheritanceTests` fixes the rule that the outgoing manager loses access *even as the
-  > record's author*. Answering a probe with anything but a 403 is the worse trade.
+  > record's author*. Answering a probe with anything but a 403 is the worse trade. The **report** on
+  > their own Held meeting is the exception, and gets a 409: they keep their role, so it is a conflict.
 - **One save is one transaction.** `_save_section` wraps its formset saves in `transaction.atomic()`.
   The self-review tab writes three separate formsets; without this, a failure part-way committed the
   evidence but not the scores, and the page gave the user no way to tell what had landed.

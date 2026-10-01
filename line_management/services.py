@@ -76,12 +76,15 @@ def touch_meetings(*pks):
 
 
 @transaction.atomic
-def save_meeting_page(meeting, version, form, agreed, carried, *, hold=False):
+def save_meeting_page(meeting, version, form, agreed, carried, *, hold=False, as_report=False):
     """Save a meeting page only if the meeting is still at ``version``.
 
     ``hold`` also marks the meeting Held, inside the same conditional UPDATE, so
     a hold inherits the version check: a stale page can never hold a meeting.
     The caller decides whether the viewer may hold (``can_hold_meeting``).
+    ``as_report`` additionally requires the meeting to be still being prepared,
+    in the same WHERE clause: the report may never write to a Held meeting, and
+    that must not rest only on every hold having advanced the version.
 
     One conditional UPDATE writes the new version and the note fields this user
     may edit (never ``form.save()``: that is a full-row write of an instance
@@ -97,7 +100,10 @@ def save_meeting_page(meeting, version, form, agreed, carried, *, hold=False):
     if hold:
         editable["state"] = LineMeeting.State.HELD
     new_version = _next_version(version)
-    updated = LineMeeting.objects.filter(pk=meeting.pk, updated_at=version).update(
+    current = LineMeeting.objects.filter(pk=meeting.pk, updated_at=version)
+    if as_report:
+        current = current.filter(state=LineMeeting.State.PREPARING)
+    updated = current.update(
         updated_at=new_version, **editable
     )
     if updated != 1:

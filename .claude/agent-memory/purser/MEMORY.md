@@ -1,2 +1,2 @@
-- [Line management data map](project_line_management_data_map.md) — MeetingAction PROTECTs, legacy prose read-only, formset id-queryset trap, importer CAS, leg-2 version token, leg-3 state migration + open gaps
+- [Line management data map](project_line_management_data_map.md) — MeetingAction PROTECTs, legacy prose read-only, formset id-queryset trap, importer CAS, leg-2 version token, leg-3 state migration, leg-4 report scope + open gaps
 - [Appraisals data map](project_appraisals_data_map.md) — free-text/bounded fields, cascades (PROTECT from staff), yes/no clobber rule, Goal 1 reword command scope

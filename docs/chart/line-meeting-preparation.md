@@ -73,6 +73,21 @@ to the report.
 - *(Leg 3)* **Every create refusal hands text back** — including an `IntegrityError` with no preparing
   meeting to point at (generic 409), never a 500. A repeated create folds without a second banner.
 - *(Leg 3)* `purge_empty_line_meetings` deletes **Held** empties only.
+- *(Leg 4)* **One `edit_scope(role, meeting)`** (ALL / PREPARE / NONE) threaded through every form
+  bind; `REPORT_FIELDS` is an allowlist (date, Upcoming, Main matters). Q1 (a): while being prepared
+  the report may reword or delete any action agreed at the meeting, the manager's included — no
+  per-row ownership, which would have gated on provenance.
+- *(Leg 4)* **The report on a Held meeting gets a 409 hand-back, not a 403**: they keep their role,
+  so it is a conflict. Lost role is still 403. `save_meeting_page(as_report=True)` also requires
+  `state=PREPARING` in the WHERE, so the rule does not rest on every hold advancing the version.
+- *(Leg 4)* The report starts through pk-less `prepare/` URLs sharing the manager's create workflow
+  (`_new` / `_create`, `_Starter`). `why_cannot_prepare` words each refusal (no record / no line
+  manager / self as line manager) so an administrator is sent to the actual fault.
+- *(Leg 4)* Accepted: a crafted POST to `prepare/create/` by someone with no line manager gets a 409
+  echoing only their own text (nothing saved), the same path as losing eligibility mid-typing.
+- *(DPIA, 2026-10-01)* Leg 4 widens who writes these records (the report edits their own meeting
+  before it is Held). Put to the head of school, who confirmed it is acceptable. Leg 3 added no new
+  data category or audience.
 - *(Leg 3)* Importer: an update never writes notes (only `created_by_email`, CAS on the notes); the
   "would strand actions" rule lives in `line_management.services.would_strand_actions`, counting
   actions agreed at a meeting being prepared too.
@@ -83,7 +98,7 @@ to the report.
 | 1 | Line manager records actions and RAG-rates last meeting's actions | — | `MeetingAction` + migration; `start_meeting` pinning carried actions; agreed-actions and carried-actions (RAG + comment) formsets on create/detail; legacy action text read-only; extended `is_empty` + purge; admin inline (superuser-only delete, `GATED_MODELS`); RAG pill widget; formset error includes; `NOTE_FIELDS` pin test | Quartermaster, Carpenter, Bosun, Master-at-Arms, Purser, Gunner, Lookout; Gauntlet; Purser | **done 2026-09-30** (committed 470c790; not yet deployed) |
 | 2 | A stale save is refused and the typed text handed back | 1 | hidden `updated_at` token; compare-and-swap save service; action-only saves touch the meeting; 409 via `render_save_blocked`; two-session tests | Quartermaster, Carpenter, Master-at-Arms, Purser, Gunner, Lookout; Gauntlet; Purser | **done 2026-10-01** (committed 470c790; not yet deployed) |
 | 3 | Line manager starts a meeting to prepare and marks it Held; dashboards count Held only | 1 | `state` migration (existing → Held); partial unique constraint; "Save and mark as held" button; repeat guard kept; carry-forward from latest Held; overview/team counts filter Held; importer creates Held; import UPDATE path becomes compare-and-swap (skip + report if notes changed since the prior import); state badge | Quartermaster, Carpenter, Bosun, Master-at-Arms, Purser, Gunner, Lookout; Gauntlet; Purser | **done 2026-10-01** (not yet committed or deployed) |
-| 4 | The member of staff prepares their next line meeting | 2, 3 | report-start view/URL + chokepoint (non-blank `line_manager_email`); `can_prepare_meeting`; per-field and per-row gating in forms; read-only once Held; "Prepare next meeting" on My Line Meetings; role-matrix + IDOR tests (crafted POST cannot touch Rotation; stranger 403 on every new endpoint; successor manager inherits mid-preparation; **the report posting `hold` on a meeting they can edit saves but stays PREPARING** — leg 3's hold tests cannot isolate `can_hold_meeting`, since today `can_edit_meeting` already 403s the report) | Quartermaster, Carpenter, Bosun, Master-at-Arms, Purser, Gunner, Lookout; Gauntlet; Purser | open |
+| 4 | The member of staff prepares their next line meeting | 2, 3 | report-start view/URL + chokepoint (non-blank `line_manager_email`); `can_prepare_meeting`; per-field and per-row gating in forms; read-only once Held; "Prepare next meeting" on My Line Meetings; role-matrix + IDOR tests (crafted POST cannot touch Rotation; stranger 403 on every new endpoint; successor manager inherits mid-preparation; **the report posting `hold` on a meeting they can edit saves but stays PREPARING** — leg 3's hold tests cannot isolate `can_hold_meeting`, since today `can_edit_meeting` already 403s the report) | Quartermaster, Carpenter, Bosun, Master-at-Arms, Purser, Gunner, Lookout; Gauntlet; Purser | **done 2026-10-01** (not yet committed or deployed) |
 
 ## Leg 3 plan (approved at council 2026-10-01 — built 2026-10-01; kept for the record)
 
@@ -191,13 +206,22 @@ overview ("no status field"), and import (hash-match overwrite) sections; note t
 Purser (reads `0003` and the importer update path), Gunner, Lookout. Gauntlet applies.
 
 ## Not yet charted
-- **Leg 4 widens who writes these records** (the report edits before Held). Put it to whoever owns
-  the DPIA before leg 4 ships; leg 3 added no new data category or audience.
-- Leg 3's new tests have not been mutation-checked (shown to fail with their guard removed).
+- Leg 3's new tests have not been mutation-checked (shown to fail with their guard removed). Leg 4's
+  key guards were (allowlist, report hold gate, `as_report` filter): each test failed with its guard
+  removed.
+- **Who changed what**: either party can now clear text the other wrote on a meeting being prepared
+  (the Purser's point); only "Started by" is kept. A last-edited-by on notes and ratings may be
+  wanted — not a defect, since the version check stops blind overwrites.
+- A report whose line manager is cleared while a meeting is being prepared can keep editing it, but
+  only a superuser can then hold it — joins the "left Being prepared, never held" item below.
+- Hand-back pages show RAG ratings as stored codes ("GREEN"), not labels.
+- The next prepared meeting defaults to today, which a future-dated Held meeting refuses (clear
+  error, text kept).
 - Colour contrast of `--rag-green` / `--rag-red` with white 13px text (~3.4:1 / ~4.4:1) — shared
   app-wide tokens, so a separate tidy, not this chart.
 - Read-only view for the report renders disabled inputs; a plain-text read view (RAG badges) would
-  read better. Revisit in leg 4, where the report's view changes anyway.
+  read better. Leg 4 kept it (display polish over a path that loses nothing); only the Rotation
+  update is shown as text to the report while preparing.
 - Whether an unfinished (Red/Amber) action rolls on automatically to the meeting after next, or is
   re-agreed by hand. Decide after leg 1 has run a few cycles.
 - Showing who last edited a section or rating (`created_by_email` on actions may be enough).

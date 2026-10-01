@@ -39,5 +39,15 @@ Leg-3 plan decisions (2026-10-01):
 - Importer: hash includes the notes, so a hash match means incoming == what the prior import wrote; CAS = stored notes equal incoming, else SKIP "edited in the app since import" (in validate for preview, and conditional .update in apply). No raw_json lookup needed. Importer CREATE skips if the staff member has unreviewed actions agreed on/before the row date (would strand them).
 - Test fixtures (make_meeting, team/overview tests) must pass state=HELD — default PREPARING + constraint breaks multi-meeting fixtures.
 
+Leg-4 plan decisions (2026-10-01, pending developer answer on Q1 action scope):
+- No migration if Q1(a) accepted. Per-row ownership of actions by `created_by_email` rejected: provenance never gates access in this app.
+- permissions.py: `can_prepare_meeting(role, meeting)` = REPORT and not held; `edit_scope(role, meeting)` -> ALL/PREPARE/NONE. Hold stays `can_hold_meeting`.
+- forms: only LineMeetingForm differs by role — report gets an ALLOWLIST (`REPORT_FIELDS` = meeting_date, upcoming, main_matters); everything else disabled, so a new field is manager-only by default. Agreed/carried formsets unchanged (report = manager on a PREPARING meeting).
+- Report start = separate pk-less URLs `prepare/` + `prepare/create/` with chokepoint on viewer's own StaffMember (non-blank line_manager_email, not self). Create body extracted into one shared helper used by meeting_create and prepare_create; role passed in; hold ignored for report; back-dated report create = date error (no hold option).
+- meeting_save gate order: 403 no role -> report on Held = 409 hand-back (conflict, keeps role; like appraisals lock) -> hold computed -> version 409/fold -> validate -> CAS (add state=PREPARING to the filter for report saves).
+- `_is_exact_repeat` and `_bind` must take the scope (browsers don't post disabled inputs; full-scope binding makes every report double-click a 409).
+- Plain-text read view stays fog; "still preparing" banner removed (unreachable now).
+- Fits one passage.
+
 **Why:** article 6 (nothing lost), import dedupe hash stability, owner-vs-viewer and live-lookup rules already in the app.
 **How to apply:** leg 4 widens can_edit to the report while PREPARING, keeps hold manager-only, reuses the one-PREPARING refusal for the report-start view.

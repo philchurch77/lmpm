@@ -5,18 +5,29 @@
 {% block content %}
   <header class="page-header">
     <h1 class="page-title">My Line Meetings</h1>
-    <p class="appraisal-sub">Records of your own line-management meetings (read-only), and meetings you host for the people you line-manage.</p>
+    <p class="appraisal-sub">Your own line-management meetings, which you can prepare before each meeting, and meetings you host for the people you line-manage.</p>
   </header>
 
   <section class="dashboard-section">
     <h2 class="section-title">My meetings</h2>
+    {% if preparing %}
+      <div class="actions actions--row">
+        <a class="button" href="{% url 'line_management:meeting_detail' pk=preparing.pk %}">Continue preparing your next meeting</a>
+      </div>
+    {% elif can_prepare %}
+      <div class="actions actions--row">
+        <a class="button" href="{% url 'line_management:prepare_new' %}">Prepare your next meeting</a>
+      </div>
+    {% else %}
+      <p class="muted">{{ cannot_prepare_reason }}</p>
+    {% endif %}
     {% if meetings %}
       <table class="dashboard-table">
         <thead>
           <tr>
             <th>Meeting date</th>
             <th>Status</th>
-            <th>Recorded by</th>
+            <th>Started by</th>
             <th></th>
           </tr>
         </thead>
@@ -49,7 +60,7 @@
             <th>Staff member</th>
             <th>Meeting date</th>
             <th>Status</th>
-            <th>Recorded by</th>
+            <th>Started by</th>
             <th></th>
           </tr>
         </thead>
