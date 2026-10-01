@@ -7,9 +7,9 @@ by the old "create-then-fill" flow. Use --dry-run to preview first.
 from __future__ import annotations
 
 from django.core.management.base import BaseCommand
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 
-from line_management.models import LineMeeting
+from line_management.models import LineMeeting, MeetingAction
 
 
 class Command(BaseCommand):
@@ -30,7 +30,13 @@ class Command(BaseCommand):
         for field in LineMeeting.NOTE_FIELDS:
             blank &= Q(**{field: ""}) | Q(**{f"{field}__regex": r"^\s*$"})
 
-        empties = LineMeeting.objects.filter(blank).select_related("staff")
+        # A meeting that agreed or reviewed any action is never empty — and its
+        # actions are PROTECTed, so deleting it would fail part-way anyway.
+        has_actions = Exists(
+            MeetingAction.objects.filter(agreed_at=OuterRef("pk"))
+        ) | Exists(MeetingAction.objects.filter(reviewed_in=OuterRef("pk")))
+
+        empties = LineMeeting.objects.filter(blank).exclude(has_actions).select_related("staff")
         count = empties.count()
 
         if not count:

@@ -71,12 +71,86 @@ class LineMeeting(models.Model):
 
     @property
     def is_empty(self) -> bool:
-        """True when no note section has content (the record holds only a date).
+        """True when the record holds only a date: no note section has content and
+        no action was agreed at or reviewed in it.
 
         Records are no longer created until the manager saves, so this should be
-        rare; ``purge_empty_line_meetings`` uses it to clean up legacy blanks.
+        rare; ``purge_empty_line_meetings`` uses the same rule to clean up legacy
+        blanks. ``NOTE_FIELDS`` is deliberately not extended with the actions —
+        the importer's ``source_row_hash`` is computed from it.
         """
-        return not any((getattr(self, f) or "").strip() for f in self.NOTE_FIELDS)
+        if any((getattr(self, f) or "").strip() for f in self.NOTE_FIELDS):
+            return False
+        if self.pk is None:
+            return True
+        return not (self.agreed_actions.exists() or self.reviewed_actions.exists())
 
     def __str__(self):
         return f"{self.staff.email} — {self.meeting_date}"
+
+
+class MeetingAction(models.Model):
+    """One action agreed at a line meeting, reviewed (RAG-rated) at the next.
+
+    Like ``appraisals.Goal`` spanning two years, one row spans two meetings: it is
+    created at ``agreed_at`` and pinned to ``reviewed_in`` when the following
+    meeting is created (``services.start_meeting``). The RAG rating and review
+    comment belong to the review, so they may only be set once ``reviewed_in``
+    exists (enforced in the database).
+
+    Both FKs are PROTECT: deleting meeting N must never silently destroy the
+    ratings and comments written at meeting N+1.
+    """
+
+    class Rag(models.TextChoices):
+        RED = "RED", "Red"
+        AMBER = "AMBER", "Amber"
+        GREEN = "GREEN", "Green"
+
+    agreed_at = models.ForeignKey(
+        LineMeeting,
+        on_delete=models.PROTECT,
+        related_name="agreed_actions",
+    )
+    reviewed_in = models.ForeignKey(
+        LineMeeting,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reviewed_actions",
+    )
+    # What / by whom / by when.
+    description = models.TextField()
+    # Blank = not yet rated.
+    rag = models.CharField(max_length=5, choices=Rag.choices, blank=True, default="")
+    review_comment = models.TextField(blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["pk"]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(reviewed_in=models.F("agreed_at")),
+                name="meetingaction_not_reviewed_where_agreed",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(rag__in=["", "RED", "AMBER", "GREEN"]),
+                name="meetingaction_rag_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(reviewed_in__isnull=False)
+                | models.Q(rag="", review_comment=""),
+                name="meetingaction_rating_needs_review_meeting",
+            ),
+        ]
+
+    @property
+    def is_pinned(self) -> bool:
+        """Carried into a later meeting: its wording is settled and it can't be deleted."""
+        return self.reviewed_in_id is not None
+
+    def __str__(self):
+        # Never the description: this appears in admin and logs.
+        return f"Action {self.pk} — agreed {self.agreed_at}"

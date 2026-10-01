@@ -1,0 +1,59 @@
+{% comment %}
+Actions carried in from the last meeting, each RAG-rated with a comment.
+The action's wording is read-only here (it was settled at the meeting it was
+agreed at). Legacy prose recorded before actions were rows is shown read-only
+and is never on any form, so no save can change it.
+Each rating group and comment is named by its action's text (id "<prefix>-text")
+so a screen reader can tell the rows apart.
+Expects: carried_formset, meeting (None when new), source (new meetings only).
+{% endcomment %}
+<div class="reflection-card">
+  <div class="reflection-card-header">Actions from the last meeting</div>
+  <div class="reflection-card-body">
+    {{ carried_formset.management_form }}
+    {% if typed_ratings %}
+      <div class="field-errors" role="alert">
+        <p><strong>What you typed on the page you submitted (not saved):</strong></p>
+        <ul>
+          {% for r in typed_ratings %}
+            <li>{% if r.description %}{{ r.description }} — {% endif %}{% if r.rag %}{{ r.rag }}{% endif %}{% if r.rag and r.comment %}: {% endif %}{{ r.comment|linebreaksbr }}{% if r.reviewed_on %} <em>(already reviewed at the meeting of {{ r.reviewed_on|date:"j M Y" }}; open that meeting to see or change its rating)</em>{% endif %}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+    {% if carried_formset.forms %}
+      <p class="muted">How is each action going? Red — not done or blocked · Amber — in progress · Green — done.</p>
+    {% endif %}
+    {% for f in carried_formset %}
+      <div class="meeting-action">
+        {{ f.id }}
+        <p class="meeting-action-text" id="{{ f.prefix }}-text">{{ f.instance.description|linebreaksbr }}</p>
+        <p class="muted">Agreed at the meeting of {{ f.instance.agreed_at.meeting_date|date:"j M Y" }}</p>
+        <div class="field-row">
+          <span class="field-label">RAG rating</span>
+          {% include "line_management/_widgets/rag_pill.html" with field=f.rag labelledby=f.prefix %}
+        </div>
+        <div class="field-row">
+          <label for="{{ f.review_comment.id_for_label }}">Comment</label>
+          {{ f.review_comment }}
+        </div>
+      </div>
+    {% endfor %}
+
+    {% if meeting and meeting.actions_from_last_meeting.strip %}
+      <div class="legacy-notes">
+        <span class="field-label">Recorded as notes</span>
+        <p class="muted">Written before actions were listed separately. Read-only.</p>
+        <p>{{ meeting.actions_from_last_meeting|linebreaksbr }}</p>
+      </div>
+    {% elif not meeting and source and source.actions_from_meeting.strip %}
+      <div class="legacy-notes">
+        <span class="field-label">Actions recorded as notes at the meeting of {{ source.meeting_date|date:"j M Y" }}</span>
+        <p class="muted">Written before actions were listed separately. Read-only.</p>
+        <p>{{ source.actions_from_meeting|linebreaksbr }}</p>
+      </div>
+    {% elif not carried_formset.forms %}
+      <p class="muted">No actions were carried forward from the last meeting.</p>
+    {% endif %}
+  </div>
+</div>

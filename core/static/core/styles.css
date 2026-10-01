@@ -2396,6 +2396,54 @@ summary:focus-visible {
 .seg-pill--score-2 input:checked + .seg-pill-text { background: var(--rag-amber); color: var(--colour-black); }
 .seg-pill--score-3 input:checked + .seg-pill-text { background: var(--rag-green); color: var(--colour-white); }
 
+/* Line-meeting action RAG rating */
+.seg-pill--rag-red input:checked + .seg-pill-text { background: var(--rag-red); color: var(--colour-white); }
+.seg-pill--rag-amber input:checked + .seg-pill-text { background: var(--rag-amber); color: var(--colour-black); }
+.seg-pill--rag-green input:checked + .seg-pill-text { background: var(--rag-green); color: var(--colour-white); }
+
+.seg-pill:focus-within {
+  outline: 2px solid var(--colour-primary);
+  outline-offset: 2px;
+}
+
+.meeting-action + .meeting-action {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--colour-border);
+}
+
+.meeting-action--blank + .meeting-action--blank {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.meeting-action-text {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+
+.meeting-action-remove {
+  min-height: 44px;
+}
+
+.meeting-action-remove .check-row-text {
+  color: var(--rag-red);
+}
+
+/* Read-only records stay legible: a member of staff reads their own actions here. */
+.meeting-action textarea:disabled {
+  opacity: 1;
+  color: var(--colour-heading);
+  background: var(--colour-bg);
+}
+
+.legacy-notes {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--colour-bg);
+}
+
 .seg-pill:has(input:checked) {
   border-color: var(--colour-primary-dark);
 }

@@ -24,7 +24,8 @@
     {% endif %}
 
     <div class="actions">
-      <a class="button" href="{{ back_url }}" data-skip-unsaved-check>{{ back_label }}</a>
+      {% comment %} A new tab keeps this page — and the user's text — open beside the latest version. {% endcomment %}
+      <a class="button" href="{{ back_url }}" target="_blank" rel="noopener" data-skip-unsaved-check>{{ back_label }} (opens in a new tab)</a>
     </div>
   </div>
 </div>

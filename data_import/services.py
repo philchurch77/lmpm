@@ -43,6 +43,7 @@ from appraisals.models import (
 from appraisals.self_review_templates import SUPPORT_ITEMS, TEACHING_ITEMS
 from core.models import School, StaffMember
 from line_management.models import LineMeeting
+from line_management.services import touch_meetings
 
 from .models import ImportBatch, ImportedModel, ImportRow, ImportType
 
@@ -588,7 +589,10 @@ def apply_line_meeting_row(data: dict, resolved: dict):
         defaults["created_by_email"] = resolved["created_by"]
 
     if resolved["existing_pk"] and LineMeeting.objects.filter(pk=resolved["existing_pk"]).exists():
+        # .update() bypasses auto_now; the meeting's version must still move so an
+        # open meeting page refuses to save over the imported text.
         LineMeeting.objects.filter(pk=resolved["existing_pk"]).update(**defaults)
+        touch_meetings(resolved["existing_pk"])
         return ImportedModel.LINE_MEETING, resolved["existing_pk"]
 
     meeting = LineMeeting.objects.create(

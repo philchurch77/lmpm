@@ -1,0 +1,16 @@
+{% comment %}
+Renders a RadioSelect field as a segmented Not rated / Red / Amber / Green pill group.
+Expects: field (a BoundField using RadioSelect, choices "", "RED", "AMBER", "GREEN");
+labelledby (optional) — the form prefix whose "<prefix>-text" element names the group.
+{% endcomment %}
+<div class="seg-group" role="radiogroup" {% if labelledby %}aria-labelledby="{{ labelledby }}-text"{% else %}aria-label="{{ field.label }}"{% endif %}>
+  {% for radio in field %}
+    {% with val=radio.data.value %}
+    <label class="seg-pill{% if val == 'RED' %} seg-pill--rag-red{% elif val == 'AMBER' %} seg-pill--rag-amber{% elif val == 'GREEN' %} seg-pill--rag-green{% else %} seg-pill--clear{% endif %}">
+      {{ radio.tag }}
+      <span class="seg-pill-text">{{ radio.choice_label }}</span>
+    </label>
+    {% endwith %}
+  {% endfor %}
+</div>
+{% if field.errors %}<div class="field-errors">{{ field.errors }}</div>{% endif %}

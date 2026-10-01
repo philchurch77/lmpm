@@ -458,8 +458,50 @@ simpler — one editor, no status/lock, no field split.
   (stamped server-side from the acting user, lowercased in `save()`) and is **never** used for
   authorization. Every view surfaces it so an inherited note stays attributed to its real author.
 - `NOTE_FIELDS` lists the five note-section field names; the `is_empty` property is true when all of
-  them are blank/whitespace-only (i.e. the record holds only a date). Used by the create flow's
-  empty-save guard and by `purge_empty_line_meetings` (see "Views & nav" and "Known follow-ups").
+  them are blank/whitespace-only **and** the meeting agreed or reviewed no action (i.e. the record
+  holds only a date). Used by `purge_empty_line_meetings` (see "Known follow-ups").
+  **`NOTE_FIELDS` is frozen at the original five** — the importer's `source_row_hash` is computed from
+  it, so adding a field would make every re-uploaded export duplicate its meetings. A test pins it.
+- `MeetingAction` — **one action, spanning two meetings** (same shape as `Goal` spanning two years).
+  Created at `agreed_at` (`related_name="agreed_actions"`); pinned to `reviewed_in`
+  (`related_name="reviewed_actions"`) when the next meeting is created, where it gets its `rag`
+  (`RED`/`AMBER`/`GREEN`, blank = not rated) and `review_comment`. Both FKs are `PROTECT`: deleting
+  meeting N must not destroy the ratings written at N+1. DB check constraints forbid reviewing an
+  action in the meeting that agreed it, and a rating/comment on an action not yet carried forward.
+  **A pinned action is settled**: its wording is disabled and it cannot be deleted (the formset drops
+  `DELETE` and `_should_delete_form` refuses a crafted one).
+- **Carry-forward is pinned, not derived** (`line_management/services.py`): `start_meeting` pins the
+  unreviewed actions of the report's latest meeting (by `meeting_date`, then `created_at`, then pk)
+  in the create transaction, with a compare-and-swap `.update()` that rolls the whole create back
+  (`CarryForwardChanged`, text handed back) if another request pinned them first. A meeting dated
+  **before** that source pins nothing, and is refused if the manager typed ratings for it. Leg 3 of
+  `docs/chart/line-meeting-preparation.md` narrows the source to Held meetings.
+- **Legacy action prose**: `actions_from_last_meeting` / `actions_from_meeting` are on no form, so no
+  save can overwrite them; stored text is shown read-only ("Recorded as notes"). On a new meeting the
+  source meeting's legacy `actions_from_meeting` is shown for reference. Never split into rows.
+- **Each formset saves only its own columns** (`update_fields`: agreed = `description`; carried =
+  `rag`, `review_comment`). The rows are loaded at request start, so a full-row save would write back
+  a stale `reviewed_in` — undoing a pin made in the same request, or wiping a later meeting's rating.
+- **Every action stays in the review cycle.** New actions may only be recorded on the report's
+  latest meeting (`can_add`; enforced in the formset's `clean()`, not just by not offering rows —
+  a stale page still posts them). A back-dated create may hold notes only. A saved meeting's date
+  may not move before the actions it reviews, nor (while it holds unreviewed actions) behind a later
+  meeting (`LineMeetingForm.clean_meeting_date`).
+- **Stale pages refuse visibly, never silently.** Each formset's hidden `id` is restricted to its own
+  queryset (Django's default is the whole table, so a stale/foreign id validated and its typed text
+  was silently skipped). On create, if the posted carried ids differ from the current candidates
+  (or the in-transaction pin check fails), nothing is saved and `refuse_stale` rebuilds the carried
+  list, keeps the notes/new actions bound, and echoes what was typed. A reworded or deleted action
+  that was pinned meanwhile is refused with the wording echoed.
+- **Admin**: a meeting's `staff` is read-only once saved (an action spans two meetings, so moving one
+  would put one person's actions on another's record). A pinned action cannot be deleted or reworded
+  (standalone admin and the inline — the inline disables DELETE per row, since an inline's
+  `has_delete_permission` only sees the parent). Rating an unpinned action is a form error, not a 500.
+  Both admin change forms refuse a **stale form** (the meeting form on `meeting_version`, the action
+  form on the action's own `updated_at`), checked in `clean()` with the affected meeting rows locked
+  (`_lock_meetings`, pk order) so no page save can land between check and write. The meeting inline
+  shows `rag`/`review_comment` **read-only**: they belong to the *reviewing* meeting's page, and a
+  stale inline would otherwise overwrite them under the wrong meeting's version.
 
 ### Access control — a LIVE lookup, not a snapshot (the key design difference from appraisals)
 - `line_management/permissions.py` resolves the viewer's role (super / manager / report / none) via
@@ -483,9 +525,14 @@ simpler — one editor, no status/lock, no field split.
   `hosted_meetings` (meetings for everyone the viewer **currently** line-manages, via
   `line_managed_staff`, the same live lookup the access rule uses, so nothing shown is a dead link);
   `staff_meetings` (one report's meetings + "New meeting"); `meeting_new` (GET: renders a blank form,
-  **persists nothing**); `meeting_create` (POST: create-on-save — refuses to save a record with no
-  note content via `LineMeeting.is_empty`, so abandoning the form leaves no record); `meeting_detail`,
-  `meeting_save` (POST).
+  **persists nothing and pins nothing**); `meeting_create` (POST: create-on-save — refuses a record
+  with no notes, no new action and no carried rating/comment, so abandoning the form leaves no record);
+  `meeting_detail`, `meeting_save` (POST). Each page posts **three forms**: `LineMeetingForm`, the
+  inline `AgreedActionFormSet` (prefix `agreed`) and the edit-only `CarriedActionFormSet` (prefix
+  `carried`); every formset queryset is derived server-side from the meeting, so a crafted row id is a
+  form error. The double-submit guard (`services.find_repeat_submission`) folds a create only when the
+  notes, the agreed actions **and** the carried ratings all repeat exactly — the old notes-only guard
+  would have merged two genuine same-day meetings that held only actions.
 - **Nav**: `line_management/context_processors.py` exposes `user_is_line_manager` so
   `core/.../base.html` shows "My Reports" only to line managers; "My Line Meetings" shows for
   everyone.
@@ -686,8 +733,20 @@ bearing for that claim; each was written to close a defect that had actually shi
 - **The one destructive import option remains `clear_blank_fields`** — goals upload only, two review-
   comment fields only. See "The one destructive option" above.
 
-**Known remaining gap (not fixed, deliberately):** saves are last-write-wins with no version check, so
-one person with the same record open in two browser tabs can overwrite themselves. Cross-*role*
+**Line meetings are version-checked** (leg 2 of `docs/chart/line-meeting-preparation.md`): the page
+carries `LineMeeting.updated_at` as a hidden `meeting_version` stamp, and `services.save_meeting_page`
+is one conditional UPDATE on it — a stale, missing or malformed stamp writes nothing and returns the
+409 hand-back (`core/recovery.py`, with readable section labels). The ordering is load-bearing:
+`get_meeting_or_403` → `can_edit_meeting` 403 → version 409, so the hand-back is never shown to someone
+who has lost access. **Every write that changes what a meeting page may edit must advance that
+meeting's `updated_at`**: a page save, pinning its actions into the next meeting (`start_meeting`
+touches the source first — meeting row before action rows, for lock order), admin action edits
+(`touch_meetings`), and the importer's `.update()`. Save tests must post a current stamp (the
+`versioned()` helper in `line_management/tests.py`) or they silently test the 409 instead.
+
+**Known remaining gap for appraisals (not fixed, deliberately):** appraisal saves are last-write-wins
+with no version check, so one person with the same record open in two browser tabs can overwrite
+themselves. Cross-*role*
 clobbering is already prevented — fields the poster may not edit are `disabled`, and Django then reads
 them from the freshly-loaded instance rather than the stale POST. Closing the remaining case properly
 needs an `updated_at` on `Goal` / `SelfReviewItem` / `SelfReviewBullet` (none have one) plus per-row

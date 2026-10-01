@@ -1,1 +1,2 @@
+- [Line meeting enforcement](project_line_meeting_enforcement.md) — chokepoints, action formset scoping, leg-2 403-before-409 order, handback labels, version writers
 - [Appraisal enforcement](project_appraisal_enforcement.md) — get_appraisal_or_403 chokepoint, RoleGatedForm disabling, owner-not-viewer variant rule, audited-clean items

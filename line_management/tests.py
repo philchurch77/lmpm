@@ -10,16 +10,23 @@ email. ``PermissionDenied`` surfaces as HTTP 403 through the test client.
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
+from django.contrib import admin as django_admin
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import TestCase
+from django.db import IntegrityError, transaction
+from django.db.models import ProtectedError
+from django.test import RequestFactory, TestCase
 from django.urls import reverse
+from django.utils.html import escape
 
 from core.models import StaffMember
 
-from .models import LineMeeting
+from .admin import LineMeetingAdmin, MeetingActionAdmin, MeetingActionInline
+from .models import LineMeeting, MeetingAction
+from .services import CarryForwardChanged, meeting_version, start_meeting
 
 
 def make_user(email, *, is_superuser=False):
@@ -46,6 +53,40 @@ def make_meeting(staff, *, created_by_email="", meeting_date=None):
         created_by_email=created_by_email,
         meeting_date=meeting_date or date(2026, 1, 15),
     )
+
+
+def management_form(prefix, total=0, initial=0):
+    """The hidden management-form fields a formset needs to bind."""
+    return {
+        f"{prefix}-TOTAL_FORMS": str(total),
+        f"{prefix}-INITIAL_FORMS": str(initial),
+        f"{prefix}-MIN_NUM_FORMS": "0",
+        f"{prefix}-MAX_NUM_FORMS": "1000",
+    }
+
+
+def meeting_payload(**fields):
+    """A meeting-page POST with no action rows; override any field by keyword."""
+    payload = {
+        "meeting_date": "2026-02-01",
+        "upcoming": "",
+        "rotation_update": "",
+        "main_matters": "",
+        **management_form("agreed"),
+        **management_form("carried"),
+    }
+    payload.update(fields)
+    return payload
+
+
+def versioned(payload, meeting):
+    """``payload`` plus the meeting's *current* version stamp, as a fresh page carries.
+
+    Save tests that are about something other than staleness must send this, or
+    they get the 409 hand-back and stop exercising what they were written for.
+    """
+    current = LineMeeting.objects.get(pk=getattr(meeting, "pk", meeting))
+    return {**payload, "meeting_version": meeting_version(current)}
 
 
 class MeetingRoleMatrixTests(TestCase):
@@ -77,16 +118,9 @@ class MeetingRoleMatrixTests(TestCase):
         )
 
     def _save_payload(self, **overrides):
-        payload = {
-            "meeting_date": "2026-02-01",
-            "actions_from_last_meeting": "",
-            "upcoming": "",
-            "rotation_update": "",
-            "main_matters": "saved by test",
-            "actions_from_meeting": "",
-        }
-        payload.update(overrides)
-        return payload
+        return versioned(
+            meeting_payload(**{"main_matters": "saved by test", **overrides}), self.meeting
+        )
 
     # Catches a report being able to open a meeting that is not theirs.
     def test_report_can_view_own_meeting(self):
@@ -187,14 +221,7 @@ class ManagerChangeInheritanceTests(TestCase):
         )
 
     def _save_payload(self):
-        return {
-            "meeting_date": "2026-02-01",
-            "actions_from_last_meeting": "",
-            "upcoming": "",
-            "rotation_update": "",
-            "main_matters": "edited after handover",
-            "actions_from_meeting": "",
-        }
+        return versioned(meeting_payload(main_matters="edited after handover"), self.meeting)
 
     def _switch_manager_to_new(self):
         self.report.line_manager_email = self.new_email
@@ -263,14 +290,10 @@ class CaseInsensitiveManagerMatchTests(TestCase):
         self.assertEqual(self.client.get(detail_url).status_code, 200)
         self.client.post(
             save_url,
-            {
-                "meeting_date": "2026-03-01",
-                "actions_from_last_meeting": "",
-                "upcoming": "",
-                "rotation_update": "",
-                "main_matters": "case-insensitive edit",
-                "actions_from_meeting": "",
-            },
+            versioned(
+                meeting_payload(meeting_date="2026-03-01", main_matters="case-insensitive edit"),
+                meeting,
+            ),
             follow=True,
         )
         meeting.refresh_from_db()
@@ -380,14 +403,7 @@ class ManagedStaffChokepointTests(TestCase):
             "line_management:meeting_create", args=[self.report.pk]
         )
         # A valid create POST: a date plus at least one note section.
-        self.valid_post = {
-            "meeting_date": "2026-02-01",
-            "actions_from_last_meeting": "",
-            "upcoming": "",
-            "rotation_update": "",
-            "main_matters": "Discussed timetable.",
-            "actions_from_meeting": "",
-        }
+        self.valid_post = meeting_payload(main_matters="Discussed timetable.")
 
     # Catches the current manager being denied their own team list.
     def test_current_manager_can_list_reports_meetings(self):
@@ -431,7 +447,7 @@ class ManagedStaffChokepointTests(TestCase):
     # Catches the root cause of blank records: a notes-free save must not persist.
     def test_create_with_only_a_date_is_rejected(self):
         self.client.force_login(self.manager_user)
-        response = self.client.post(self.create_url, {"meeting_date": "2026-02-01"})
+        response = self.client.post(self.create_url, meeting_payload())
         self.assertEqual(response.status_code, 200)
         self.assertFalse(LineMeeting.objects.filter(staff=self.report).exists())
 
@@ -476,7 +492,7 @@ class EmptyRecordTests(TestCase):
     def test_purge_deletes_empties_and_keeps_content(self):
         empty = make_meeting(self.staff)
         kept = make_meeting(self.staff)
-        kept.actions_from_meeting = "Follow up on cover."
+        kept.main_matters = "Follow up on cover."
         kept.save()
 
         call_command("purge_empty_line_meetings")
@@ -491,7 +507,7 @@ class EmptyRecordTests(TestCase):
 
 
 class DoubleSubmitGuardTests(TestCase):
-    """meeting_create's _existing_duplicate: one meeting per submission.
+    """meeting_create's repeat-submission guard: one meeting per submission.
 
     LineMeeting deliberately carries no uniqueness constraint, because two
     genuine meetings can share a staff member and a date. That left a
@@ -522,15 +538,9 @@ class DoubleSubmitGuardTests(TestCase):
         self.client.force_login(self.manager_user)
 
     def _post(self, **overrides):
-        payload = {
-            "meeting_date": "2026-02-01",
-            "actions_from_last_meeting": "",
-            "upcoming": "",
-            "rotation_update": "",
-            "main_matters": "Discussed timetable and cover.",
-            "actions_from_meeting": "",
-        }
-        payload.update(overrides)
+        payload = meeting_payload(
+            **{"main_matters": "Discussed timetable and cover.", **overrides}
+        )
         return self.client.post(self.create_url, payload)
 
     # Catches the double-click duplicate: two identical POSTs, one record.
@@ -573,8 +583,8 @@ class DoubleSubmitGuardTests(TestCase):
     # Catches the guard matching on only some of the note fields: a repeat that
     # differs in ONE section is a different meeting and must still be created.
     def test_difference_in_any_single_note_field_creates_a_second_meeting(self):
-        self._post(actions_from_meeting="")
-        self._post(actions_from_meeting="Book the room for next time.")
+        self._post(upcoming="")
+        self._post(upcoming="Book the room for next time.")
 
         self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 2)
 
@@ -583,14 +593,7 @@ class DoubleSubmitGuardTests(TestCase):
     def test_identical_notes_for_a_different_report_are_not_folded_together(self):
         other = make_staff("second@oxlip.test", line_manager_email=self.manager_email)
         make_user("second@oxlip.test")
-        payload = {
-            "meeting_date": "2026-02-01",
-            "actions_from_last_meeting": "",
-            "upcoming": "",
-            "rotation_update": "",
-            "main_matters": "Standing agenda item.",
-            "actions_from_meeting": "",
-        }
+        payload = meeting_payload(main_matters="Standing agenda item.")
 
         self.client.post(self.create_url, payload)
         self.client.post(
@@ -599,3 +602,1690 @@ class DoubleSubmitGuardTests(TestCase):
 
         self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
         self.assertEqual(LineMeeting.objects.filter(staff=other).count(), 1)
+
+
+# ---------------------------------------------------------------------------
+# Leg 1 of docs/chart/line-meeting-preparation.md: MeetingAction rows, carry-
+# forward pinning, RAG ratings, legacy prose, admin gates.
+# ---------------------------------------------------------------------------
+
+
+def make_action(agreed_at, description="An action", *, reviewed_in=None, rag="", comment=""):
+    return MeetingAction.objects.create(
+        agreed_at=agreed_at,
+        description=description,
+        reviewed_in=reviewed_in,
+        rag=rag,
+        review_comment=comment,
+    )
+
+
+def agreed_rows(existing=(), new=()):
+    """POST rows for the ``agreed`` formset.
+
+    ``existing`` is a sequence of (action, description, delete) tuples, posted as
+    the initial forms; ``new`` is a sequence of texts for the blank rows.
+    """
+    data = management_form("agreed", len(existing) + len(new), len(existing))
+    for i, (action, text, delete) in enumerate(existing):
+        data[f"agreed-{i}-id"] = str(action.pk)
+        data[f"agreed-{i}-description"] = text
+        if delete:
+            data[f"agreed-{i}-DELETE"] = "on"
+    for j, text in enumerate(new, start=len(existing)):
+        data[f"agreed-{j}-description"] = text
+    return data
+
+
+def carried_rows(rows=()):
+    """POST rows for the ``carried`` formset: a sequence of (action, rag, comment)."""
+    data = management_form("carried", len(rows), len(rows))
+    for i, (action, rag, comment) in enumerate(rows):
+        data[f"carried-{i}-id"] = str(action.pk)
+        data[f"carried-{i}-rag"] = rag
+        data[f"carried-{i}-review_comment"] = comment
+    return data
+
+
+def snapshot(action):
+    """Everything about an action row that a crafted POST must not change."""
+    return (
+        MeetingAction.objects.filter(pk=action.pk)
+        .values_list("agreed_at_id", "reviewed_in_id", "description", "rag", "review_comment", "updated_at")
+        .first()
+    )
+
+
+class MeetingActionIsolationTests(TestCase):
+    """Gauntlet stage 3: a manager of two reports can only touch the actions of
+    the meeting they posted to; reports and strangers can touch none."""
+
+    def setUp(self):
+        self.m_email = "m@oxlip.test"
+        self.m_user = make_user(self.m_email)
+        make_staff(self.m_email)
+        self.r1_user = make_user("r1@oxlip.test")
+        self.r1 = make_staff("r1@oxlip.test", line_manager_email=self.m_email)
+        make_user("r2@oxlip.test")
+        self.r2 = make_staff("r2@oxlip.test", line_manager_email=self.m_email)
+        self.stranger_user = make_user("stranger@oxlip.test")
+        make_staff("stranger@oxlip.test")
+
+        self.m1 = make_meeting(self.r1, meeting_date=date(2026, 1, 10))
+        self.m1.main_matters = "R1 notes"
+        self.m1.save()
+
+        # R2: an older meeting whose action is pinned (and rated) at a later one,
+        # plus an unpinned action on R2's latest meeting.
+        self.r2_old = make_meeting(self.r2, meeting_date=date(2026, 1, 3))
+        self.r2_latest = make_meeting(self.r2, meeting_date=date(2026, 1, 10))
+        self.r2_pinned = make_action(
+            self.r2_old, "R2 pinned", reviewed_in=self.r2_latest, rag="AMBER", comment="R2 comment"
+        )
+        self.r2_open = make_action(self.r2_latest, "R2 open")
+        self.r2_before = [snapshot(self.r2_pinned), snapshot(self.r2_open)]
+
+        self.save_url = reverse("line_management:meeting_save", args=[self.m1.pk])
+        self.create_url = reverse("line_management:meeting_create", args=[self.r1.pk])
+
+    def assertR2Untouched(self):
+        self.assertEqual([snapshot(self.r2_pinned), snapshot(self.r2_open)], self.r2_before)
+        self.assertEqual(
+            list(self.r2_latest.agreed_actions.values_list("description", flat=True)), ["R2 open"]
+        )
+
+    # Catches a crafted agreed-row id rewording another report's action.
+    def test_crafted_agreed_id_cannot_reword_another_reports_action(self):
+        self.client.force_login(self.m_user)
+        payload = meeting_payload(main_matters="R1 notes", **agreed_rows([(self.r2_open, "HACKED", False)]))
+        self.client.post(self.save_url, versioned(payload, self.m1))
+        self.assertR2Untouched()
+
+    # Catches a crafted agreed-row id + DELETE destroying another report's action.
+    def test_crafted_agreed_id_with_delete_cannot_remove_another_reports_action(self):
+        self.client.force_login(self.m_user)
+        payload = meeting_payload(main_matters="R1 notes", **agreed_rows([(self.r2_open, "HACKED", True)]))
+        payload["agreed-0-agreed_at"] = str(self.m1.pk)
+        self.client.post(self.save_url, versioned(payload, self.m1))
+        self.assertR2Untouched()
+
+    # Catches a crafted carried-row id rating another report's reviewed action on save.
+    def test_crafted_carried_id_on_save_cannot_rate_another_reports_action(self):
+        self.client.force_login(self.m_user)
+        payload = meeting_payload(
+            main_matters="R1 notes", **carried_rows([(self.r2_pinned, "RED", "HACKED")])
+        )
+        self.client.post(self.save_url, versioned(payload, self.m1))
+        self.assertR2Untouched()
+
+    # Catches create for one report pinning, rating or displaying another report's action.
+    def test_crafted_carried_id_on_create_cannot_pin_or_rate_another_reports_action(self):
+        self.client.force_login(self.m_user)
+        payload = meeting_payload(
+            meeting_date="2026-02-01",
+            main_matters="New R1 meeting",
+            **carried_rows([(self.r2_open, "GREEN", "HACKED")]),
+        )
+        response = self.client.post(self.create_url, payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertR2Untouched()
+        self.assertNotContains(response, "R2 open")
+        self.assertEqual(LineMeeting.objects.filter(staff=self.r1).count(), 1)
+
+    # Catches the inline fk field re-parenting a new action onto another report's meeting.
+    def test_agreed_at_field_cannot_reparent_action_to_another_reports_meeting(self):
+        self.client.force_login(self.m_user)
+        for url in (self.save_url, self.create_url):
+            payload = meeting_payload(main_matters="R1 notes", **agreed_rows(new=["REPARENTED"]))
+            payload["agreed-0-agreed_at"] = str(self.r2_latest.pk)
+            self.client.post(url, versioned(payload, self.m1))
+        self.assertR2Untouched()
+        self.assertFalse(
+            MeetingAction.objects.filter(description="REPARENTED")
+            .exclude(agreed_at__staff=self.r1)
+            .exists()
+        )
+
+    # Catches an inflated carried TOTAL_FORMS minting new action rows.
+    def test_inflated_carried_total_forms_creates_no_action_rows(self):
+        self.client.force_login(self.m_user)
+        before = MeetingAction.objects.count()
+        payload = meeting_payload(main_matters="R1 notes", **management_form("carried", 3, 0))
+        for i in range(3):
+            payload[f"carried-{i}-rag"] = "RED"
+            payload[f"carried-{i}-review_comment"] = "ghost row"
+        self.client.post(self.save_url, versioned(payload, self.m1))
+        self.assertEqual(MeetingAction.objects.count(), before)
+        self.assertFalse(MeetingAction.objects.filter(review_comment="ghost row").exists())
+
+    # Catches the report writing action rows on their own read-only record.
+    def test_report_posting_action_rows_to_own_meeting_gets_403_and_rows_unchanged(self):
+        own = make_action(self.m1, "Agreed by manager")
+        later = make_meeting(self.r1, meeting_date=date(2026, 1, 20))
+        carried = make_action(self.m1, "Carried one", reviewed_in=later)
+        before = [snapshot(own), snapshot(carried)]
+        count = MeetingAction.objects.count()
+
+        self.client.force_login(self.r1_user)
+        payload = meeting_payload(
+            main_matters="R1 notes", **agreed_rows([(own, "REPORT EDIT", True)], new=["REPORT NEW"])
+        )
+        self.assertEqual(self.client.post(self.save_url, versioned(payload, self.m1)).status_code, 403)
+
+        payload = meeting_payload(**carried_rows([(carried, "GREEN", "report rating")]))
+        later_save = reverse("line_management:meeting_save", args=[later.pk])
+        self.assertEqual(self.client.post(later_save, versioned(payload, later)).status_code, 403)
+
+        self.assertEqual([snapshot(own), snapshot(carried)], before)
+        self.assertEqual(MeetingAction.objects.count(), count)
+
+    # Catches the report being handed editable action fields on their own record.
+    def test_report_sees_action_fields_disabled(self):
+        later = make_meeting(self.r1, meeting_date=date(2026, 1, 20))
+        make_action(self.m1, "Carried to later", reviewed_in=later)
+        make_action(later, "Agreed at later")
+
+        self.client.force_login(self.r1_user)
+        page = self.client.get(
+            reverse("line_management:meeting_detail", args=[later.pk])
+        ).content.decode()
+
+        tags = re.findall(
+            r"<(?:textarea|input)[^>]*name=\"(?:agreed|carried)-\d+-(?:description|rag|review_comment)\"[^>]*>",
+            page,
+        )
+        names = {re.search(r'name="([^"]+)"', t).group(1) for t in tags}
+        self.assertEqual(
+            names, {"agreed-0-description", "carried-0-rag", "carried-0-review_comment"}
+        )
+        for tag in tags:
+            self.assertIn("disabled", tag, tag)
+        self.assertNotIn("agreed-0-DELETE", page)
+
+    # Catches a stranger reaching any action path by guessing a meeting or staff pk.
+    def test_stranger_gets_403_on_every_action_path_and_nothing_changes(self):
+        own = make_action(self.m1, "R1 action")
+        before = snapshot(own)
+        self.client.force_login(self.stranger_user)
+        payload = meeting_payload(main_matters="x", **agreed_rows([(own, "STRANGER", True)]))
+        detail = reverse("line_management:meeting_detail", args=[self.m1.pk])
+        self.assertEqual(self.client.get(detail).status_code, 403)
+        self.assertEqual(self.client.post(self.save_url, versioned(payload, self.m1)).status_code, 403)
+        self.assertEqual(self.client.post(self.create_url, payload).status_code, 403)
+        self.assertEqual(snapshot(own), before)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.r1).count(), 1)
+
+    # Catches a successor manager being unable to rate actions inherited from a predecessor.
+    def test_successor_manager_can_rate_inherited_carried_actions(self):
+        later = make_meeting(self.r1, meeting_date=date(2026, 1, 20))
+        inherited = make_action(self.m1, "Inherited action", reviewed_in=later)
+        successor_user = make_user("successor@oxlip.test")
+        make_staff("successor@oxlip.test")
+        self.r1.line_manager_email = "successor@oxlip.test"
+        self.r1.save()
+
+        self.client.force_login(successor_user)
+        payload = meeting_payload(
+            meeting_date="2026-01-20", **carried_rows([(inherited, "AMBER", "Halfway there")])
+        )
+        response = self.client.post(
+            reverse("line_management:meeting_save", args=[later.pk]), versioned(payload, later)
+        )
+        self.assertEqual(response.status_code, 302)
+        inherited.refresh_from_db()
+        self.assertEqual((inherited.rag, inherited.review_comment), ("AMBER", "Halfway there"))
+        self.assertEqual(inherited.reviewed_in_id, later.pk)
+
+
+class MeetingActionAdminTests(TestCase):
+    """The admin's delete and re-parenting gates for action rows."""
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.super_user = make_user("root@oxlip.test", is_superuser=True)
+        self.staff_admin = User.objects.create_user(
+            username="staffadmin@oxlip.test", email="staffadmin@oxlip.test", password="pw", is_staff=True
+        )
+        person = make_staff("person@oxlip.test")
+        self.m1 = make_meeting(person, meeting_date=date(2026, 1, 10))
+        self.m2 = make_meeting(person, meeting_date=date(2026, 1, 20))
+        self.pinned = make_action(self.m1, "Pinned", reviewed_in=self.m2, rag="RED", comment="Blocked")
+        self.open = make_action(self.m2, "Open")
+
+    def _request(self, user):
+        request = self.factory.get("/")
+        request.user = user
+        return request
+
+    # Catches a non-superuser admin deleting action rows through the meeting inline.
+    def test_inline_refuses_action_delete_to_non_superuser(self):
+        inline = MeetingActionInline(LineMeeting, django_admin.site)
+        self.assertFalse(inline.has_delete_permission(self._request(self.staff_admin), self.m1))
+
+    # Catches a superuser deleting a reviewed action and with it the later meeting's rating.
+    def test_action_admin_refuses_deleting_pinned_action_even_for_superuser(self):
+        model_admin = MeetingActionAdmin(MeetingAction, django_admin.site)
+        request = self._request(self.super_user)
+        self.assertFalse(model_admin.has_delete_permission(request, self.pinned))
+        self.assertTrue(model_admin.has_delete_permission(request, self.open))
+
+        self.client.force_login(self.super_user)
+        url = reverse("admin:line_management_meetingaction_delete", args=[self.pinned.pk])
+        self.client.post(url, {"post": "yes"})
+        self.assertTrue(MeetingAction.objects.filter(pk=self.pinned.pk).exists())
+
+    # Catches the admin moving a saved meeting (and its actions) onto another person.
+    def test_meeting_admin_makes_staff_read_only_on_existing_meeting(self):
+        model_admin = LineMeetingAdmin(LineMeeting, django_admin.site)
+        request = self._request(self.super_user)
+        self.assertIn("staff", model_admin.get_readonly_fields(request, self.m1))
+        self.assertNotIn("staff", model_admin.get_readonly_fields(request, None))
+
+    # Catches rating an unpinned action in the admin ending in an IntegrityError 500.
+    def test_admin_rating_unpinned_action_returns_form_error_not_500(self):
+        before = snapshot(self.open)
+        self.client.force_login(self.super_user)
+        url = reverse("admin:line_management_meetingaction_change", args=[self.open.pk])
+        response = self.client.post(
+            url, {"description": "Open", "rag": "RED", "review_comment": "too early", "_save": "Save"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "can only be rated once it has been carried")
+        self.assertEqual(snapshot(self.open), before)
+
+
+class MeetingActionModelTests(TestCase):
+    """Database-level rules that keep a rating attached to the meeting that wrote it."""
+
+    def setUp(self):
+        self.person = make_staff("person@oxlip.test")
+        self.m1 = make_meeting(self.person, meeting_date=date(2026, 1, 10))
+        self.m2 = make_meeting(self.person, meeting_date=date(2026, 1, 20))
+
+    # Catches NOTE_FIELDS drifting, which would silently change every import source_row_hash.
+    def test_note_fields_are_pinned_to_the_five_import_hash_fields(self):
+        self.assertEqual(
+            LineMeeting.NOTE_FIELDS,
+            (
+                "actions_from_last_meeting",
+                "upcoming",
+                "rotation_update",
+                "main_matters",
+                "actions_from_meeting",
+            ),
+        )
+
+    # Catches an action being reviewed at the same meeting it was agreed at.
+    def test_action_cannot_be_reviewed_where_agreed(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            make_action(self.m1, reviewed_in=self.m1)
+
+    # Catches a rating or comment stored with no meeting it was written at.
+    def test_rating_or_comment_needs_reviewed_in(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            make_action(self.m1, rag="RED")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            make_action(self.m1, comment="orphan comment")
+
+    # Catches deleting a meeting cascading away its actions or the ratings written in it.
+    def test_deleting_meeting_holding_agreed_or_reviewed_actions_is_protected(self):
+        action = make_action(self.m1, "Keep me", reviewed_in=self.m2, rag="GREEN", comment="Done")
+        with self.assertRaises(ProtectedError):
+            self.m1.delete()
+        with self.assertRaises(ProtectedError):
+            self.m2.delete()
+        action.refresh_from_db()
+        self.assertEqual((action.rag, action.review_comment), ("GREEN", "Done"))
+
+    # Catches is_empty calling a meeting blank when it agreed actions.
+    def test_is_empty_false_when_meeting_has_agreed_actions(self):
+        make_action(self.m1)
+        self.assertFalse(self.m1.is_empty)
+
+    # Catches is_empty calling a meeting blank when it reviewed actions.
+    def test_is_empty_false_when_meeting_has_reviewed_actions(self):
+        make_action(self.m1, reviewed_in=self.m2)
+        self.assertFalse(self.m2.is_empty)
+
+    # Catches the purge deleting notes-free meetings that hold actions and ratings.
+    def test_purge_keeps_notes_free_meetings_that_hold_actions(self):
+        truly_empty = make_meeting(self.person, meeting_date=date(2026, 1, 25))
+        make_action(self.m1, "Agreed", reviewed_in=self.m2, rag="AMBER")
+        call_command("purge_empty_line_meetings")
+        self.assertTrue(LineMeeting.objects.filter(pk=self.m1.pk).exists())
+        self.assertTrue(LineMeeting.objects.filter(pk=self.m2.pk).exists())
+        self.assertFalse(LineMeeting.objects.filter(pk=truly_empty.pk).exists())
+
+
+class _ManagerCreateMixin:
+    """A manager, one report, and a helper to POST the create form."""
+
+    def setUp(self):
+        self.manager_email = "boss@oxlip.test"
+        self.manager_user = make_user(self.manager_email)
+        make_staff(self.manager_email)
+        make_user("report@oxlip.test")
+        self.report = make_staff("report@oxlip.test", line_manager_email=self.manager_email)
+        self.create_url = reverse("line_management:meeting_create", args=[self.report.pk])
+        self.client.force_login(self.manager_user)
+
+    def create(self, meeting_date="2026-02-01", carried=(), agreed=(), **notes):
+        payload = meeting_payload(meeting_date=meeting_date, **notes)
+        payload.update(carried_rows(carried))
+        payload.update(agreed_rows(new=agreed))
+        return self.client.post(self.create_url, payload)
+
+    def newest(self):
+        return LineMeeting.objects.filter(staff=self.report).order_by("-pk").first()
+
+
+class CarryForwardTests(_ManagerCreateMixin, TestCase):
+    """start_meeting pins exactly the latest meeting's unreviewed actions, once."""
+
+    # Catches a new meeting failing to pick up last meeting's open actions.
+    def test_create_pins_unreviewed_actions_from_latest_meeting(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a, b = make_action(prev, "A"), make_action(prev, "B")
+        response = self.create(carried=[(a, "", ""), (b, "", "")], main_matters="Notes")
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            sorted(self.newest().reviewed_actions.values_list("pk", flat=True)), sorted([a.pk, b.pk])
+        )
+
+    # Catches an already-reviewed action being re-pinned (and its rating moved) by the next meeting.
+    def test_already_reviewed_action_is_not_repinned(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        self.assertEqual(self.create("2026-02-01", carried=[(a, "GREEN", "Done")], agreed=["B"]).status_code, 302)
+        second = self.newest()
+        b = MeetingAction.objects.get(description="B")
+
+        self.assertEqual(self.create("2026-03-01", carried=[(b, "", "")], main_matters="Third").status_code, 302)
+        third = self.newest()
+        a.refresh_from_db()
+        b.refresh_from_db()
+        self.assertEqual((a.reviewed_in_id, a.rag, a.review_comment), (second.pk, "GREEN", "Done"))
+        self.assertEqual(b.reviewed_in_id, third.pk)
+
+    # Catches actions from a meeting older than the latest being swept into the new one.
+    def test_older_meetings_unreviewed_actions_are_not_carried(self):
+        old = make_meeting(self.report, meeting_date=date(2025, 12, 1))
+        stale = make_action(old, "Never carried")
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        current = make_action(prev, "Carry me")
+        self.assertEqual(self.create(carried=[(current, "", "")], main_matters="x").status_code, 302)
+        stale.refresh_from_db()
+        self.assertIsNone(stale.reviewed_in_id)
+
+    # Catches the source being chosen by creation order instead of meeting date.
+    def test_source_is_latest_by_meeting_date_not_creation_order(self):
+        late = make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        late_action = make_action(late, "From the later-dated meeting")
+        early = make_meeting(self.report, meeting_date=date(2026, 1, 5))  # created second
+        early_action = make_action(early, "From the back-dated meeting")
+        self.assertEqual(self.create(carried=[(late_action, "", "")], main_matters="x").status_code, 302)
+        late_action.refresh_from_db()
+        early_action.refresh_from_db()
+        self.assertEqual(late_action.reviewed_in_id, self.newest().pk)
+        self.assertIsNone(early_action.reviewed_in_id)
+
+    # Catches a second meeting on the same day failing to review the first's actions.
+    def test_same_day_second_meeting_carries_from_first(self):
+        first = make_meeting(self.report, meeting_date=date(2026, 2, 1))
+        a = make_action(first, "Morning action")
+        self.assertEqual(self.create("2026-02-01", carried=[(a, "AMBER", "")], main_matters="PM").status_code, 302)
+        a.refresh_from_db()
+        self.assertEqual((a.reviewed_in_id, a.rag), (self.newest().pk, "AMBER"))
+
+    # Catches a back-dated meeting reviewing actions agreed after its own date.
+    def test_back_dated_meeting_pins_nothing(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        response = self.create("2026-01-01", carried=[(a, "", "")], main_matters="Back-dated notes")
+        self.assertEqual(response.status_code, 302)
+        a.refresh_from_db()
+        self.assertIsNone(a.reviewed_in_id)
+
+    # Catches a back-dated meeting writing a rating it may not hold, or discarding what was typed.
+    def test_back_dated_meeting_with_typed_rating_is_refused_and_text_kept(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        before = snapshot(a)
+        response = self.create(
+            "2026-01-01", carried=[(a, "RED", "Blocked by cover")], main_matters="Back-dated notes kept"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Blocked by cover")
+        self.assertContains(response, "Back-dated notes kept")
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        self.assertEqual(snapshot(a), before)
+
+    # Catches another report's open actions being pinned into this report's meeting.
+    def test_another_reports_actions_are_never_pinned(self):
+        other = make_staff("other@oxlip.test", line_manager_email=self.manager_email)
+        theirs = make_action(make_meeting(other, meeting_date=date(2026, 1, 10)), "Theirs")
+        mine = make_action(make_meeting(self.report, meeting_date=date(2026, 1, 10)), "Mine")
+        self.assertEqual(self.create(carried=[(mine, "", "")], main_matters="x").status_code, 302)
+        theirs.refresh_from_db()
+        self.assertIsNone(theirs.reviewed_in_id)
+
+    # Catches the carried formset's save writing back a stale reviewed_in and unpinning the action.
+    def test_rating_saved_on_create_does_not_unpin(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        self.assertEqual(self.create(carried=[(a, "RED", "Stuck on timetabling")]).status_code, 302)
+        a.refresh_from_db()
+        self.assertEqual(
+            (a.reviewed_in_id, a.rag, a.review_comment), (self.newest().pk, "RED", "Stuck on timetabling")
+        )
+
+
+class StaleCarryForwardTests(_ManagerCreateMixin, TestCase):
+    """A create page whose carried list went out of date is refused, text handed back."""
+
+    # Catches a stale page's rating being written onto an action another meeting now reviews.
+    def test_stale_page_rating_is_refused_and_typed_text_handed_back(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "Chase the supplier")
+        page = self.client.get(reverse("line_management:meeting_new", args=[self.report.pk]))
+        self.assertContains(page, "Chase the supplier")
+
+        # Meanwhile, another meeting is created and pins the action.
+        self.assertEqual(
+            self.create("2026-02-01", carried=[(a, "", "")], main_matters="Other tab").status_code, 302
+        )
+        count = LineMeeting.objects.filter(staff=self.report).count()
+
+        response = self.create(
+            "2026-02-02", carried=[(a, "RED", "Supplier never replied")], main_matters="Stale page notes"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), count)
+        self.assertContains(response, "Supplier never replied")
+        self.assertContains(response, "Stale page notes")
+        a.refresh_from_db()
+        self.assertEqual((a.rag, a.review_comment), ("", ""))
+
+    # Catches an action added after the page loaded being pinned without the user seeing it.
+    def test_action_added_to_source_after_page_load_is_not_silently_pinned(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        shown = make_action(prev, "Shown on page")
+        unseen = make_action(prev, "Added after page load")
+        response = self.create(carried=[(shown, "GREEN", "")], main_matters="Notes")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        shown.refresh_from_db()
+        unseen.refresh_from_db()
+        self.assertIsNone(shown.reviewed_in_id)
+        self.assertIsNone(unseen.reviewed_in_id)
+
+    # Catches start_meeting keeping a half-made meeting when the pinned set differs from the shown set.
+    def test_start_meeting_rolls_back_when_pinned_set_differs_from_shown(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        make_action(prev, "B")
+        meeting = LineMeeting(staff=self.report, meeting_date=date(2026, 2, 1), main_matters="x")
+        with self.assertRaises(CarryForwardChanged):
+            start_meeting(meeting, source=prev, pin=True, shown_ids=[a.pk])
+        self.assertIsNone(meeting.pk)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        self.assertFalse(MeetingAction.objects.filter(reviewed_in__isnull=False).exists())
+
+
+class CreateWithActionsTests(_ManagerCreateMixin, TestCase):
+    """The create flow with agreed and carried actions."""
+
+    # Catches agreed actions typed on the create page being dropped.
+    def test_create_saves_agreed_actions(self):
+        self.assertEqual(self.create(agreed=["Book the room", "Draft the letter", ""]).status_code, 302)
+        self.assertEqual(
+            list(self.newest().agreed_actions.values_list("description", flat=True)),
+            ["Book the room", "Draft the letter"],
+        )
+
+    # Catches the blank "Add an action" rows being saved as empty actions.
+    def test_blank_extra_rows_create_nothing(self):
+        self.assertEqual(self.create(agreed=["", "", ""], main_matters="Notes only").status_code, 302)
+        self.assertFalse(MeetingAction.objects.exists())
+
+    # Catches a meeting whose only content is ratings being refused as empty.
+    def test_create_with_only_carried_ratings_is_saved(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        self.assertEqual(self.create(carried=[(a, "GREEN", "")]).status_code, 302)
+        a.refresh_from_db()
+        self.assertEqual(a.rag, "GREEN")
+
+    # Catches a date-only create persisting a blank meeting that swallows last meeting's actions.
+    def test_date_only_create_is_rejected_and_pins_nothing(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        self.assertEqual(self.create(carried=[(a, "", "")]).status_code, 200)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        a.refresh_from_db()
+        self.assertIsNone(a.reviewed_in_id)
+
+    # Catches a double-clicked save creating two meetings or two sets of actions.
+    def test_double_submit_with_actions_creates_one_meeting_and_one_set_of_actions(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        first = self.create(carried=[(a, "AMBER", "Going")], agreed=["New one"], main_matters="x")
+        second = self.create(carried=[(a, "AMBER", "Going")], agreed=["New one"], main_matters="x")
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(first["Location"], second["Location"])
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 2)
+        self.assertEqual(MeetingAction.objects.filter(description="New one").count(), 1)
+
+    # Catches two genuine actions-only meetings on one day being folded into one, losing the second.
+    def test_two_actions_only_meetings_on_same_day_are_not_folded(self):
+        self.assertEqual(self.create("2026-02-01", agreed=["Call parent"]).status_code, 302)
+        call = MeetingAction.objects.get(description="Call parent")
+        self.assertEqual(
+            self.create("2026-02-01", carried=[(call, "", "")], agreed=["Book room"]).status_code, 302
+        )
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 2)
+        self.assertTrue(MeetingAction.objects.filter(description="Book room").exists())
+
+    # Catches an invalid create discarding the actions and comments that were typed.
+    def test_invalid_create_rerenders_typed_actions_and_comments(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        response = self.create(
+            "not-a-date",
+            carried=[(a, "RED", "Typed review comment")],
+            agreed=["Typed new action"],
+            main_matters="Typed notes",
+        )
+        self.assertEqual(response.status_code, 200)
+        for text in ("Typed review comment", "Typed new action", "Typed notes"):
+            self.assertContains(response, text)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        self.assertFalse(MeetingAction.objects.filter(description="Typed new action").exists())
+
+
+class ActionLossTests(TestCase):
+    """Nothing typed against an action is lost or silently dropped (article 6)."""
+
+    def setUp(self):
+        self.manager_email = "boss@oxlip.test"
+        self.manager_user = make_user(self.manager_email)
+        make_staff(self.manager_email)
+        self.report = make_staff("report@oxlip.test", line_manager_email=self.manager_email)
+        self.m1 = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        self.m1.main_matters = "First"
+        self.m1.save()
+        self.client.force_login(self.manager_user)
+
+    def save(self, meeting, rows):
+        data = meeting_payload(
+            meeting_date=meeting.meeting_date.isoformat(), main_matters=meeting.main_matters
+        )
+        data.update(rows)
+        return self.client.post(reverse("line_management:meeting_save", args=[meeting.pk]), versioned(data, meeting))
+
+    def _pinned(self):
+        m2 = make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        return make_action(self.m1, "Settled wording", reviewed_in=m2, rag="RED", comment="Blocked"), m2
+
+    # Catches a crafted DELETE removing a reviewed action (and its rating) under "Meeting saved".
+    def test_pinned_action_cannot_be_deleted_via_crafted_post(self):
+        action, _ = self._pinned()
+        before = snapshot(action)
+        response = self.save(self.m1, agreed_rows([(action, "Settled wording", True)]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "can no longer be changed or removed")
+        self.assertNotContains(response, "Meeting saved")
+        self.assertEqual(snapshot(action), before)
+
+    # Catches a crafted reword of a reviewed action being applied, or dropped in silence.
+    def test_pinned_action_cannot_be_reworded_via_crafted_post(self):
+        action, _ = self._pinned()
+        before = snapshot(action)
+        response = self.save(self.m1, agreed_rows([(action, "Quietly rewritten", False)]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "can no longer be changed or removed")
+        self.assertContains(response, "Quietly rewritten")
+        self.assertNotContains(response, "Meeting saved")
+        self.assertEqual(snapshot(action), before)
+
+    # Catches the remove tick box not working on an action nobody has reviewed yet.
+    def test_unreviewed_action_can_be_deleted(self):
+        action = make_action(self.m1, "Change of plan")
+        response = self.save(self.m1, agreed_rows([(action, "Change of plan", True)]))
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(MeetingAction.objects.filter(pk=action.pk).exists())
+
+    # Catches an edit to a sibling action writing back stale review columns on a pinned one.
+    def test_editing_unpinned_action_does_not_wipe_rating_on_pinned_sibling(self):
+        pinned, m2 = self._pinned()
+        sibling = make_action(self.m1, "Added later in the admin")
+        before = snapshot(pinned)
+        response = self.save(
+            self.m1,
+            agreed_rows([(pinned, "Settled wording", False), (sibling, "Reworded sibling", False)]),
+        )
+        self.assertEqual(response.status_code, 302)
+        sibling.refresh_from_db()
+        self.assertEqual(sibling.description, "Reworded sibling")
+        self.assertEqual(snapshot(pinned), before)
+
+        # Saving the reviewing meeting with the rating unchanged keeps it too.
+        self.save(m2, carried_rows([(pinned, "RED", "Blocked")]))
+        pinned.refresh_from_db()
+        self.assertEqual((pinned.reviewed_in_id, pinned.rag, pinned.review_comment), (m2.pk, "RED", "Blocked"))
+
+    # Catches blank "Add an action" rows on an older meeting, whose actions would never be reviewed.
+    def test_non_latest_meeting_renders_no_blank_add_action_rows(self):
+        make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        old = self.client.get(reverse("line_management:meeting_detail", args=[self.m1.pk]))
+        self.assertEqual(old.context["agreed_formset"].extra_forms, [])
+        self.assertNotContains(old, "Add an action")
+
+    # Catches action text or a review comment changing across save, reload and re-save.
+    def test_action_text_round_trips_emoji_crlf_and_curly_quotes(self):
+        text = "Ring parent \U0001F4DE about the “trip” — café\r\nThen ‘confirm’ by Friday"
+        comment = "Done ✅ “mostly”\r\n\r\nSee note — naïve"
+        create_url = reverse("line_management:meeting_create", args=[self.report.pk])
+
+        payload = meeting_payload(meeting_date="2026-01-12", main_matters="Second")
+        payload.update(agreed_rows(new=[text]))
+        self.assertEqual(self.client.post(create_url, payload).status_code, 302)
+        action = MeetingAction.objects.get(agreed_at__staff=self.report)
+        self.assertEqual(action.description, text)
+
+        m2 = action.agreed_at
+        page = self.client.get(reverse("line_management:meeting_detail", args=[m2.pk]))
+        self.assertContains(page, escape(text))
+        self.assertEqual(self.save(m2, agreed_rows([(action, text, False)])).status_code, 302)
+        action.refresh_from_db()
+        self.assertEqual(action.description, text)
+
+        # The review comment written at the next meeting round-trips the same way.
+        payload = meeting_payload(meeting_date="2026-02-10")
+        payload.update(carried_rows([(action, "GREEN", comment)]))
+        self.assertEqual(self.client.post(create_url, payload).status_code, 302)
+        action.refresh_from_db()
+        self.assertEqual(action.review_comment, comment)
+
+        m3 = action.reviewed_in
+        page = self.client.get(reverse("line_management:meeting_detail", args=[m3.pk]))
+        self.assertContains(page, escape(comment))
+        self.assertEqual(self.save(m3, carried_rows([(action, "GREEN", comment)])).status_code, 302)
+        action.refresh_from_db()
+        self.assertEqual((action.description, action.review_comment), (text, comment))
+
+
+class LegacyActionProseTests(TestCase):
+    """Legacy free-text action fields are never on a form, so never overwritten."""
+
+    LEGACY_AGREED = "Legacy agreed — line one\r\nline two"
+
+    def setUp(self):
+        self.manager_email = "boss@oxlip.test"
+        self.manager_user = make_user(self.manager_email)
+        make_staff(self.manager_email)
+        self.report = make_staff("report@oxlip.test", line_manager_email=self.manager_email)
+        self.legacy = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        self.legacy.actions_from_last_meeting = "Legacy review of last time"
+        self.legacy.actions_from_meeting = self.LEGACY_AGREED
+        self.legacy.main_matters = "Legacy notes"
+        self.legacy.save()
+        self.client.force_login(self.manager_user)
+
+    # Catches a crafted POST overwriting or clearing stored legacy action prose.
+    def test_crafted_post_cannot_overwrite_legacy_action_prose(self):
+        payload = meeting_payload(
+            meeting_date="2026-01-10",
+            main_matters="Legacy notes",
+            actions_from_meeting="HACKED",
+            actions_from_last_meeting="",
+        )
+        self.client.post(reverse("line_management:meeting_save", args=[self.legacy.pk]), versioned(payload, self.legacy))
+        self.legacy.refresh_from_db()
+        self.assertEqual(self.legacy.actions_from_meeting, self.LEGACY_AGREED)
+        self.assertEqual(self.legacy.actions_from_last_meeting, "Legacy review of last time")
+
+    # Catches stored legacy prose vanishing from the page, or being offered as an editable field.
+    def test_stored_legacy_prose_is_shown_read_only(self):
+        page = self.client.get(reverse("line_management:meeting_detail", args=[self.legacy.pk]))
+        self.assertContains(page, "Legacy review of last time")
+        self.assertContains(page, "Legacy agreed — line one")
+        self.assertContains(page, "line two")
+        self.assertNotContains(page, 'name="actions_from_meeting"')
+        self.assertNotContains(page, 'name="actions_from_last_meeting"')
+
+    # Catches a create or save writing into the legacy fields of a record that never had them.
+    def test_blank_legacy_fields_stay_blank_after_save(self):
+        payload = meeting_payload(
+            meeting_date="2026-02-01",
+            main_matters="New style meeting",
+            actions_from_meeting="SMUGGLED",
+            actions_from_last_meeting="SMUGGLED",
+        )
+        response = self.client.post(
+            reverse("line_management:meeting_create", args=[self.report.pk]), payload
+        )
+        self.assertEqual(response.status_code, 302)
+        new = LineMeeting.objects.filter(staff=self.report).order_by("-pk").first()
+        self.client.post(reverse("line_management:meeting_save", args=[new.pk]), versioned(payload, new))
+        new.refresh_from_db()
+        self.assertEqual((new.actions_from_meeting, new.actions_from_last_meeting), ("", ""))
+
+
+class AdminPinnedActionTests(TestCase):
+    """A reviewed action is settled in the admin too: no delete, no reword."""
+
+    def setUp(self):
+        self.super_user = make_user("root@oxlip.test", is_superuser=True)
+        person = make_staff("person@oxlip.test")
+        self.m1 = make_meeting(person, meeting_date=date(2026, 1, 10))
+        self.m2 = make_meeting(person, meeting_date=date(2026, 1, 20))
+        self.pinned = make_action(
+            self.m1, "Settled wording", reviewed_in=self.m2, rag="RED", comment="Blocked"
+        )
+        self.client.force_login(self.super_user)
+        self.meeting_change = reverse("admin:line_management_linemeeting_change", args=[self.m1.pk])
+
+    def _inline_post(self, **row):
+        data = {
+            "created_by_email": "",
+            "meeting_date": "2026-01-10",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "",
+            "actions_from_meeting": "",
+            **management_form("agreed_actions", 1, 1),
+            "agreed_actions-0-id": str(self.pinned.pk),
+            "agreed_actions-0-agreed_at": str(self.m1.pk),
+            "agreed_actions-0-description": "Settled wording",
+            "agreed_actions-0-rag": "RED",
+            "agreed_actions-0-review_comment": "Blocked",
+            "_save": "Save",
+        }
+        data.update(row)
+        # A fresh admin page's stamp, so this exercises the inline guard rather
+        # than the stale-form refusal.
+        return self.client.post(self.meeting_change, versioned(data, self.m1))
+
+    # Catches the meeting inline deleting or rewording a reviewed action (and its rating).
+    def test_inline_post_cannot_delete_or_reword_pinned_action(self):
+        response = self._inline_post(
+            **{"agreed_actions-0-DELETE": "on", "agreed_actions-0-description": "Rewritten in admin"}
+        )
+        self.assertEqual(response.status_code, 302)
+        action = MeetingAction.objects.filter(pk=self.pinned.pk).first()
+        self.assertIsNotNone(action, "pinned action was deleted through the inline")
+        self.assertEqual(
+            (action.description, action.reviewed_in_id, action.rag, action.review_comment),
+            ("Settled wording", self.m2.pk, "RED", "Blocked"),
+        )
+
+    # Catches the inline offering a live delete box on a reviewed action.
+    def test_inline_delete_checkbox_is_disabled_for_pinned_row(self):
+        page = self.client.get(self.meeting_change).content.decode()
+        tag = re.search(r'<input[^>]*name="agreed_actions-0-DELETE"[^>]*>', page)
+        self.assertIsNotNone(tag, "no DELETE box rendered for the pinned row")
+        self.assertIn("disabled", tag.group(0))
+
+    # Catches the action admin letting a superuser reword a reviewed action.
+    def test_action_admin_renders_description_read_only_for_pinned_action(self):
+        url = reverse("admin:line_management_meetingaction_change", args=[self.pinned.pk])
+        page = self.client.get(url)
+        self.assertEqual(page.status_code, 200)
+        self.assertNotContains(page, 'name="description"')
+        self.assertContains(page, "Settled wording")
+
+        unpinned = make_action(self.m2, "Still open")
+        url = reverse("admin:line_management_meetingaction_change", args=[unpinned.pk])
+        self.assertContains(self.client.get(url), 'name="description"')
+
+
+class MeetingDateChangeTests(TestCase):
+    """meeting_save refuses a date change that would take actions out of the review cycle."""
+
+    def setUp(self):
+        self.manager_user = make_user("boss@oxlip.test")
+        make_staff("boss@oxlip.test")
+        self.report = make_staff("report@oxlip.test", line_manager_email="boss@oxlip.test")
+        self.client.force_login(self.manager_user)
+
+    def _save_date(self, meeting, new_date):
+        payload = meeting_payload(meeting_date=new_date, main_matters=meeting.main_matters)
+        return self.client.post(reverse("line_management:meeting_save", args=[meeting.pk]), versioned(payload, meeting))
+
+    # Catches a reviewing meeting being re-dated before the meeting whose actions it reviews.
+    def test_reviewing_meeting_cannot_be_dated_before_the_actions_it_reviews(self):
+        m1 = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        m2 = make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        m2.main_matters = "Review"
+        m2.save()
+        make_action(m1, "A", reviewed_in=m2, rag="GREEN")
+        response = self._save_date(m2, "2026-01-05")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "can&#x27;t be dated before then")
+        m2.refresh_from_db()
+        self.assertEqual(m2.meeting_date, date(2026, 1, 20))
+
+    # Catches a meeting with open actions being re-dated behind a later meeting, orphaning them.
+    def test_meeting_with_unreviewed_actions_cannot_be_dated_before_a_later_meeting(self):
+        make_meeting(self.report, meeting_date=date(2026, 1, 15))
+        latest = make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        latest.main_matters = "Latest"
+        latest.save()
+        make_action(latest, "Still open")
+        response = self._save_date(latest, "2026-01-12")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "never come up for review")
+        latest.refresh_from_db()
+        self.assertEqual(latest.meeting_date, date(2026, 1, 20))
+
+
+class BackDatedAndStaleSaveTests(_ManagerCreateMixin, TestCase):
+    """Back-dated creates, stale pages and vanished rows: refused visibly, text kept."""
+
+    # Catches a back-dated create recording new actions that would never come up for review.
+    def test_back_dated_create_with_new_action_is_refused_and_text_kept(self):
+        make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        response = self.create("2026-01-01", agreed=["Back-dated action text"], main_matters="Old notes")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Back-dated action text")
+        self.assertContains(response, "Old notes")
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 1)
+        self.assertFalse(MeetingAction.objects.exists())
+
+    # Catches a back-dated notes-only create silently skipping last meeting's actions without saying so.
+    def test_back_dated_notes_only_create_saves_and_says_actions_not_reviewed(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "A")
+        payload = meeting_payload(meeting_date="2026-01-01", main_matters="Catch-up notes")
+        payload.update(carried_rows([(a, "", "")]))
+        response = self.client.post(self.create_url, payload, follow=True)
+        self.assertEqual(response.redirect_chain[-1][1], 302)
+        self.assertContains(response, "actions were not reviewed here")
+        self.assertEqual(LineMeeting.objects.filter(staff=self.report).count(), 2)
+        a.refresh_from_db()
+        self.assertIsNone(a.reviewed_in_id)
+
+    # Catches a stale page adding actions to a meeting that is no longer the latest.
+    def test_stale_page_new_action_on_non_latest_meeting_is_refused_and_echoed(self):
+        m1 = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        m1.main_matters = "First"
+        m1.save()
+        make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        payload = meeting_payload(meeting_date="2026-01-10", main_matters="First")
+        payload.update(agreed_rows(new=["Typed on a stale page"]))
+        response = self.client.post(reverse("line_management:meeting_save", args=[m1.pk]), versioned(payload, m1))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "A later meeting has been added")
+        self.assertContains(response, "Typed on a stale page")
+        self.assertFalse(MeetingAction.objects.filter(description="Typed on a stale page").exists())
+
+    # Catches the stale-page echo hiding that the typed rating's action was already reviewed elsewhere.
+    def test_stale_refusal_says_where_the_action_was_already_reviewed(self):
+        prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        a = make_action(prev, "Chase the supplier")
+        self.assertEqual(
+            self.create("2026-02-01", carried=[(a, "", "")], main_matters="Other tab").status_code, 302
+        )
+        response = self.create("2026-02-02", carried=[(a, "RED", "Never replied")], main_matters="Stale")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Never replied")
+        self.assertContains(response, "already reviewed at the meeting of 1 Feb 2026")
+
+    # Catches a vanished row reporting Django's "Select a valid choice" instead of plain English.
+    def test_row_no_longer_on_meeting_shows_plain_english_error(self):
+        m1 = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        m1.main_matters = "First"
+        m1.save()
+        gone = make_action(m1, "Removed in another tab")
+        gone_pk = gone.pk
+        gone.delete()
+        payload = meeting_payload(meeting_date="2026-01-10", main_matters="First")
+        payload.update(management_form("agreed", 1, 1))
+        payload["agreed-0-id"] = str(gone_pk)
+        payload["agreed-0-description"] = "My edit to the removed action"
+        response = self.client.post(reverse("line_management:meeting_save", args=[m1.pk]), versioned(payload, m1))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "removed or moved since you opened it")
+        self.assertNotContains(response, "Select a valid choice")
+        self.assertContains(response, "My edit to the removed action")
+
+
+# ---------------------------------------------------------------------------
+# Leg 2 of docs/chart/line-meeting-preparation.md: a stale save is refused and
+# the typed text handed back (the hidden ``meeting_version`` stamp, the
+# compare-and-swap save, and every writer advancing the version).
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta  # noqa: E402
+from datetime import timezone as dt_timezone  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from django.utils import timezone  # noqa: E402
+
+from . import services as lm_services  # noqa: E402
+from .services import (  # noqa: E402
+    MeetingChanged,
+    _next_version,
+    parse_version,
+    save_meeting_page,
+    touch_meetings,
+)
+from .views import _bind  # noqa: E402
+
+# Every meeting is aged to this stamp in setUp, so "the version moved" never
+# depends on the test clock ticking between two writes (Windows clocks are coarse).
+OLD_STAMP = datetime(2020, 1, 1, 9, 0, 0, tzinfo=dt_timezone.utc)
+
+
+def age_meetings(*meetings):
+    LineMeeting.objects.filter(pk__in=[m.pk for m in meetings]).update(updated_at=OLD_STAMP)
+
+
+def stamp_of(meeting):
+    return LineMeeting.objects.values_list("updated_at", flat=True).get(pk=meeting.pk)
+
+
+def db_state():
+    """Every meeting and action row, exactly: a refused save must leave all of it alone."""
+    return (
+        list(LineMeeting.objects.order_by("pk").values()),
+        list(MeetingAction.objects.order_by("pk").values()),
+    )
+
+
+class _StalePageMixin:
+    """A manager, a report, and meeting ``self.meeting`` (the latest) reviewing one action."""
+
+    def setUp(self):
+        self.manager_email = "boss@oxlip.test"
+        self.manager_user = make_user(self.manager_email)
+        make_staff(self.manager_email)
+        self.report_user = make_user("report@oxlip.test")
+        self.report = make_staff("report@oxlip.test", line_manager_email=self.manager_email)
+        self.prev = make_meeting(self.report, meeting_date=date(2026, 1, 10))
+        self.meeting = make_meeting(
+            self.report, created_by_email=self.manager_email, meeting_date=date(2026, 2, 1)
+        )
+        self.carried = make_action(self.prev, "Chase the supplier", reviewed_in=self.meeting)
+        LineMeeting.objects.filter(pk=self.meeting.pk).update(main_matters="Original notes")
+        age_meetings(self.prev, self.meeting)
+        self.save_url = reverse("line_management:meeting_save", args=[self.meeting.pk])
+        self.client.force_login(self.manager_user)
+
+    def version(self):
+        return meeting_version(LineMeeting.objects.get(pk=self.meeting.pk))
+
+    def page(self, version, *, main_matters="Original notes", new=(), rag="", comment="", **extra):
+        """What the meeting page posts: notes, blank-row actions, the carried row, the stamp."""
+        payload = meeting_payload(meeting_date="2026-02-01", main_matters=main_matters)
+        payload.update(agreed_rows(new=new))
+        payload.update(carried_rows([(self.carried, rag, comment)]))
+        if version is not None:
+            payload["meeting_version"] = version
+        payload.update(extra)
+        return payload
+
+    def stored_notes(self):
+        return LineMeeting.objects.values_list("main_matters", flat=True).get(pk=self.meeting.pk)
+
+
+class StaleMeetingSaveTests(_StalePageMixin, TestCase):
+    """Two pages open on one meeting: the second save is refused and its text handed back."""
+
+    # Catches a second tab silently overwriting the first tab's save (last-write-wins).
+    def test_second_tab_save_is_refused_and_every_typed_value_handed_back(self):
+        v0 = self.version()
+        self.assertEqual(
+            self.client.post(self.save_url, self.page(v0, main_matters="Tab one notes")).status_code, 302
+        )
+        before = db_state()
+        notes = "Tab two — “careful” café\r\nsecond line \U0001f600"
+        action = "Book the room ✅ by Friday"
+        comment = "Supplier replied\r\nat last \U0001f389"
+        csrf = "c" * 64
+        response = self.client.post(
+            self.save_url,
+            self.page(v0, main_matters=notes, new=[action], rag="GREEN", comment=comment,
+                      csrfmiddlewaretoken=csrf),
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(db_state(), before, "a refused save wrote something")
+        self.assertEqual(self.stored_notes(), "Tab one notes")
+        for typed in (notes, action, comment, "GREEN"):
+            self.assertContains(response, escape(typed), status_code=409)
+        for label in ("Main matters to discuss", "New action from this meeting (row 1)",
+                      "Rating for: Chase the supplier", "Comment for: Chase the supplier"):
+            self.assertContains(response, label, status_code=409)
+        self.assertNotContains(response, v0, status_code=409)
+        self.assertNotContains(response, self.version(), status_code=409)
+        self.assertNotContains(response, csrf, status_code=409)
+        self.assertNotContains(response, "Meeting version", status_code=409)
+
+    # Catches a missing or malformed stamp being read as "skip the check" and saving.
+    def test_missing_garbled_or_naive_stamp_is_refused_and_nothing_written(self):
+        naive = LineMeeting.objects.get(pk=self.meeting.pk).updated_at.astimezone(
+            dt_timezone.utc
+        ).replace(tzinfo=None).isoformat()
+        before = db_state()
+        for stamp in (None, "", "not-a-date", "2026-13-45T99:00:00+00:00", naive):
+            with self.subTest(stamp=stamp):
+                response = self.client.post(
+                    self.save_url, self.page(stamp, main_matters="Should not land", new=["Nor this"])
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertContains(response, "Should not land", status_code=409)
+                self.assertEqual(db_state(), before)
+
+    # Catches a double-clicked Save either saving twice or answering the second click with a 409.
+    def test_double_clicked_save_redirects_both_times_and_saves_once(self):
+        payload = self.page(self.version(), main_matters="Clicked twice")
+        first = self.client.post(self.save_url, payload)
+        after_first = db_state()
+        second = self.client.post(self.save_url, payload)
+        self.assertEqual((first.status_code, second.status_code), (302, 302))
+        self.assertEqual(db_state(), after_first, "the second click wrote again")
+        self.assertEqual(self.stored_notes(), "Clicked twice")
+
+    # Catches a double-clicked Save with a new action duplicating the action, and a
+    # stale page with different content being folded in as a "repeat".
+    def test_double_clicked_save_with_new_action_creates_one_action_but_changed_stale_page_409s(self):
+        v0 = self.version()
+        payload = self.page(v0, main_matters="Clicked twice", new=["Only once please"])
+        self.assertEqual(self.client.post(self.save_url, payload).status_code, 302)
+        self.assertEqual(self.client.post(self.save_url, payload).status_code, 302)
+        self.assertEqual(MeetingAction.objects.filter(description="Only once please").count(), 1)
+
+        before = db_state()
+        response = self.client.post(self.save_url, self.page(v0, main_matters="Something else"))
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(db_state(), before)
+
+    # Catches an actions-only save leaving the version alone, so another open page
+    # still passes the check and saves over it.
+    def test_action_only_save_makes_other_open_page_stale(self):
+        v0 = self.version()
+        self.assertEqual(self.client.post(self.save_url, self.page(v0, new=["Action only"])).status_code, 302)
+        self.assertNotEqual(self.version(), v0, "an actions-only save did not advance the version")
+
+        before = db_state()
+        unchanged = self.client.post(self.save_url, self.page(v0))
+        self.assertEqual(unchanged.status_code, 302, "a no-change stale page should just redirect")
+        self.assertEqual(db_state(), before)
+
+        changed = self.client.post(self.save_url, self.page(v0, main_matters="Tab B edits"))
+        self.assertEqual(changed.status_code, 409)
+        self.assertEqual(db_state(), before)
+        self.assertContains(changed, "Tab B edits", status_code=409)
+
+    # Catches pinning N's actions into N+1 leaving N's open page able to save over them.
+    def test_creating_next_meeting_makes_previous_meetings_open_page_stale(self):
+        own = make_action(self.meeting, "Draft the rota")
+        v0 = self.version()
+        create = meeting_payload(meeting_date="2026-03-01", main_matters="Next meeting")
+        create.update(carried_rows([(own, "AMBER", "Half done")]))
+        create.update(agreed_rows())
+        response = self.client.post(
+            reverse("line_management:meeting_create", args=[self.report.pk]), create
+        )
+        self.assertEqual(response.status_code, 302)
+        own.refresh_from_db()
+        self.assertIsNotNone(own.reviewed_in_id)
+
+        before = db_state()
+        stale = self.page(v0, main_matters="Late edit on N")
+        stale.update(agreed_rows(existing=[(own, "Draft the rota", False)]))
+        response = self.client.post(self.save_url, stale)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(db_state(), before)
+        self.assertContains(response, "Late edit on N", status_code=409)
+
+    # Catches an invalid stale POST being re-rendered with the fresh stamp, which the
+    # next Save would then pass (laundering the stale page).
+    def test_invalid_stale_resubmit_is_refused_not_rerendered_with_fresh_stamp(self):
+        v0 = self.version()
+        self.client.post(self.save_url, self.page(v0, main_matters="Tab one notes"))
+        before = db_state()
+        response = self.client.post(
+            self.save_url, self.page(v0, main_matters="Tab two text", meeting_date="not a date")
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertNotContains(response, self.version(), status_code=409)
+        self.assertContains(response, "Tab two text", status_code=409)
+        self.assertEqual(db_state(), before)
+
+
+class VersionAccessOrderTests(_StalePageMixin, TestCase):
+    """Gauntlet stage 3: the 403s come before the version check, so a hand-back is
+    never shown to someone without edit rights, and never leaks another record."""
+
+    # Catches a repointed (outgoing) manager getting a 409 hand-back instead of a 403.
+    def test_outgoing_manager_gets_403_with_stale_or_valid_stamp_and_no_text_echoed(self):
+        make_user("successor@oxlip.test")
+        make_staff("successor@oxlip.test")
+        valid = self.version()
+        self.report.line_manager_email = "successor@oxlip.test"
+        self.report.save()
+        before = db_state()
+        for stamp in (valid, "2000-01-01T00:00:00+00:00"):
+            with self.subTest(stamp=stamp):
+                response = self.client.post(
+                    self.save_url, self.page(stamp, main_matters="Outgoing typed this")
+                )
+                self.assertEqual(response.status_code, 403)
+                self.assertNotContains(response, "Outgoing typed this", status_code=403)
+        self.assertEqual(db_state(), before)
+
+    # Catches a stranger or the read-only report reaching the version check at all.
+    def test_stranger_and_report_get_403_whatever_the_stamp(self):
+        stranger = make_user("stranger@oxlip.test")
+        make_staff("stranger@oxlip.test")
+        before = db_state()
+        for user in (stranger, self.report_user):
+            for stamp in (self.version(), "2000-01-01T00:00:00+00:00", None):
+                with self.subTest(user=user.email, stamp=stamp):
+                    self.client.force_login(user)
+                    response = self.client.post(
+                        self.save_url, self.page(stamp, main_matters="Not theirs to write")
+                    )
+                    self.assertEqual(response.status_code, 403)
+                    self.assertNotContains(response, "Not theirs to write", status_code=403)
+        self.assertEqual(db_state(), before)
+
+    # Catches a crafted carried-N-id making the hand-back label show another report's action wording.
+    def test_handback_label_never_shows_another_reports_action_wording(self):
+        other = make_staff("other@oxlip.test", line_manager_email=self.manager_email)
+        other_prev = make_meeting(other, meeting_date=date(2026, 1, 5))
+        other_meeting = make_meeting(other, meeting_date=date(2026, 1, 25))
+        foreign = make_action(other_prev, "Confidential wording for other", reviewed_in=other_meeting)
+        payload = self.page("2000-01-01T00:00:00+00:00", main_matters="Stale notes")
+        payload.update(carried_rows([(foreign, "RED", "My typed comment")]))
+
+        response = self.client.post(self.save_url, payload)
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "My typed comment", status_code=409)
+        self.assertNotContains(response, "Confidential wording for other", status_code=409)
+        self.assertEqual(snapshot(foreign)[3:5], ("", ""))
+
+    # Catches the version stamp being handed to a viewer who may not edit (or withheld from one who may).
+    def test_only_the_editable_page_carries_a_version_stamp(self):
+        detail = reverse("line_management:meeting_detail", args=[self.meeting.pk])
+        self.assertContains(self.client.get(detail), 'name="meeting_version"')
+        self.client.force_login(self.report_user)
+        report_page = self.client.get(detail)
+        self.assertEqual(report_page.status_code, 200)
+        self.assertNotContains(report_page, 'name="meeting_version"')
+
+
+class SaveMeetingPageServiceTests(TestCase):
+    """save_meeting_page: the notes and the actions land together or not at all."""
+
+    def setUp(self):
+        self.manager_user = make_user("boss@oxlip.test")
+        make_staff("boss@oxlip.test")
+        self.staff = make_staff("person@oxlip.test", line_manager_email="boss@oxlip.test")
+        self.meeting = make_meeting(self.staff, meeting_date=date(2026, 2, 1))
+        LineMeeting.objects.filter(pk=self.meeting.pk).update(main_matters="Stored notes")
+        self.action = make_action(self.meeting, "Original wording")
+        self.later = make_meeting(self.staff, meeting_date=date(2026, 3, 1))
+        age_meetings(self.meeting, self.later)
+
+    def _payload(self, text, delete=False):
+        payload = meeting_payload(meeting_date="2026-02-01", main_matters="New notes")
+        payload.update(agreed_rows(existing=[(self.action, text, delete)]))
+        return payload
+
+    def _valid_forms(self, data):
+        meeting = LineMeeting.objects.get(pk=self.meeting.pk)
+        forms = _bind(meeting, meeting.reviewed_actions.all(), can_edit=True, data=data)
+        for f in forms:
+            self.assertTrue(f.is_valid(), getattr(f, "errors", None))
+        return meeting, forms
+
+    def _pin_behind_the_pages_back(self):
+        # An ORM update that does not touch self.meeting: the version check has passed.
+        MeetingAction.objects.filter(pk=self.action.pk).update(reviewed_in=self.later)
+
+    def _assert_rolled_back(self):
+        meeting = LineMeeting.objects.get(pk=self.meeting.pk)
+        self.assertEqual(meeting.main_matters, "Stored notes", "notes committed without the actions")
+        self.assertEqual(meeting.updated_at, OLD_STAMP)
+        action = MeetingAction.objects.filter(pk=self.action.pk).first()
+        self.assertIsNotNone(action, "pinned action was deleted")
+        self.assertEqual((action.description, action.reviewed_in_id), ("Original wording", self.later.pk))
+
+    # Catches a reword of an action pinned mid-save committing the notes anyway.
+    def test_reword_of_action_pinned_mid_save_raises_and_rolls_back_notes(self):
+        meeting, (form, agreed, carried) = self._valid_forms(self._payload("Reworded"))
+        self._pin_behind_the_pages_back()
+        with self.assertRaises(MeetingChanged):
+            save_meeting_page(meeting, meeting.updated_at, form, agreed, carried)
+        self._assert_rolled_back()
+
+    # Catches a delete of an action pinned mid-save being skipped under "Meeting saved".
+    def test_delete_of_action_pinned_mid_save_raises_and_rolls_back_notes(self):
+        meeting, (form, agreed, carried) = self._valid_forms(self._payload("Original wording", delete=True))
+        self._pin_behind_the_pages_back()
+        with self.assertRaises(MeetingChanged):
+            save_meeting_page(meeting, meeting.updated_at, form, agreed, carried)
+        self._assert_rolled_back()
+
+    # Catches the view answering a mid-save pin with a 500 or a false "saved" instead of a 409 hand-back.
+    def test_view_hands_back_text_when_action_is_pinned_mid_save(self):
+        real = lm_services.save_meeting_page
+
+        def pin_then_save(*args, **kwargs):
+            self._pin_behind_the_pages_back()
+            return real(*args, **kwargs)
+
+        self.client.force_login(self.manager_user)
+        url = reverse("line_management:meeting_save", args=[self.meeting.pk])
+        with mock.patch("line_management.views.save_meeting_page", side_effect=pin_then_save):
+            response = self.client.post(
+                url, versioned(self._payload("Original wording", delete=True), self.meeting)
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(response, "New notes", status_code=409)
+        self._assert_rolled_back()
+
+
+class VersionStampTests(TestCase):
+    """The stamp itself: it must round-trip exactly and only ever move forward."""
+
+    def setUp(self):
+        self.meeting = make_meeting(make_staff("person@oxlip.test"))
+
+    # Catches a stamp that loses precision on the round trip, making every fresh page look stale.
+    def test_meeting_version_round_trips_exactly_with_and_without_microseconds(self):
+        for when in (
+            datetime(2026, 3, 1, 12, 0, 0, tzinfo=dt_timezone.utc),
+            datetime(2026, 3, 1, 12, 0, 0, 123456, tzinfo=dt_timezone.utc),
+            datetime(2026, 7, 1, 23, 30, 5, 1, tzinfo=dt_timezone.utc),
+        ):
+            with self.subTest(when=when):
+                LineMeeting.objects.filter(pk=self.meeting.pk).update(updated_at=when)
+                stored = LineMeeting.objects.get(pk=self.meeting.pk)
+                self.assertEqual(parse_version(meeting_version(stored)), stored.updated_at)
+                self.assertEqual(parse_version(meeting_version(stored)), when)
+        for junk in (None, "", "garbage", "2026-03-01T12:00:00"):
+            with self.subTest(junk=junk):
+                self.assertIsNone(parse_version(junk))
+
+    # Catches a save on a coarse or skewed clock writing the same stamp twice.
+    def test_next_version_strictly_increases_even_when_clock_is_behind(self):
+        ahead = timezone.now() + timedelta(hours=1)
+        self.assertEqual(_next_version(ahead), ahead + timedelta(microseconds=1))
+        past = timezone.now() - timedelta(days=1)
+        self.assertGreater(_next_version(past), past)
+        fixed = datetime(2026, 3, 1, 12, 0, 0, tzinfo=dt_timezone.utc)
+        with mock.patch("line_management.services.timezone.now", return_value=fixed):
+            self.assertGreater(_next_version(fixed), fixed)
+
+    # Catches touch_meetings writing the stamp the meeting already has (clock not moved),
+    # which leaves every open page's stamp valid.
+    def test_touch_meetings_advances_version_even_when_clock_has_not_moved(self):
+        fixed = datetime(2026, 3, 1, 12, 0, 0, tzinfo=dt_timezone.utc)
+        LineMeeting.objects.filter(pk=self.meeting.pk).update(updated_at=fixed)
+        with mock.patch("line_management.services.timezone.now", return_value=fixed):
+            touch_meetings(self.meeting.pk)
+        self.assertNotEqual(stamp_of(self.meeting), fixed)
+
+
+class VersionBumpWriterTests(TestCase):
+    """Every writer that changes what a meeting page may edit advances that meeting's version."""
+
+    def setUp(self):
+        self.super_user = make_user("root@oxlip.test", is_superuser=True)
+        self.person = make_staff("person@oxlip.test")
+        self.m1 = make_meeting(self.person, meeting_date=date(2026, 1, 10))
+        self.m2 = make_meeting(self.person, meeting_date=date(2026, 1, 20))
+        self.pinned = make_action(self.m1, "Pinned", reviewed_in=self.m2)
+        self.open = make_action(self.m2, "Open on m2")
+        age_meetings(self.m1, self.m2)
+        self.client.force_login(self.super_user)
+
+    def assertMoved(self, *meetings):
+        for m in meetings:
+            self.assertNotEqual(stamp_of(m), OLD_STAMP, f"meeting {m.pk}'s version did not move")
+
+    # Catches pinning actions into a new meeting leaving the source meeting's open page valid.
+    def test_start_meeting_touches_the_source_meeting(self):
+        new = LineMeeting(staff=self.person, meeting_date=date(2026, 2, 1))
+        start_meeting(new, source=self.m2, pin=True, shown_ids=[self.open.pk])
+        self.assertMoved(self.m2)
+
+    # Catches an admin rating/comment edit not invalidating either meeting's open page.
+    def test_action_admin_save_touches_both_meetings(self):
+        url = reverse("admin:line_management_meetingaction_change", args=[self.pinned.pk])
+        # A fresh admin form carries the action's stamp (stale forms are refused).
+        fresh = MeetingAction.objects.get(pk=self.pinned.pk).updated_at.isoformat()
+        response = self.client.post(
+            url, {"rag": "GREEN", "review_comment": "Done", "action_version": fresh, "_save": "Save"}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertMoved(self.m1, self.m2)
+
+    # Catches an admin delete of an action not invalidating the meeting page that shows it.
+    def test_action_admin_delete_touches_the_meeting(self):
+        url = reverse("admin:line_management_meetingaction_delete", args=[self.open.pk])
+        self.assertEqual(self.client.post(url, {"post": "yes"}).status_code, 302)
+        self.assertFalse(MeetingAction.objects.filter(pk=self.open.pk).exists())
+        self.assertMoved(self.m2)
+
+    # Catches the bulk "Delete selected" path bypassing the version bump.
+    def test_action_admin_bulk_delete_touches_every_affected_meeting(self):
+        m3 = make_meeting(self.person, meeting_date=date(2026, 1, 30))
+        also_open = make_action(m3, "Open on m3")
+        age_meetings(m3)
+        url = reverse("admin:line_management_meetingaction_changelist")
+        response = self.client.post(url, {
+            "action": "delete_selected",
+            "_selected_action": [str(self.open.pk), str(also_open.pk)],
+            "post": "yes",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(MeetingAction.objects.filter(pk__in=[self.open.pk, also_open.pk]).exists())
+        self.assertMoved(self.m2, m3)
+
+    # Catches an admin save of a meeting (and its inline actions) leaving the reviewing meeting's page valid.
+    def test_line_meeting_admin_save_touches_reviewing_meetings(self):
+        data = {
+            "created_by_email": "",
+            "meeting_date": "2026-01-10",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Admin note",
+            "actions_from_meeting": "",
+            **management_form("agreed_actions", 1, 1),
+            "agreed_actions-0-id": str(self.pinned.pk),
+            "agreed_actions-0-agreed_at": str(self.m1.pk),
+            "agreed_actions-0-description": "Pinned",
+            "agreed_actions-0-rag": "",
+            "agreed_actions-0-review_comment": "",
+            "_save": "Save",
+        }
+        url = reverse("admin:line_management_linemeeting_change", args=[self.m1.pk])
+        response = self.client.post(url, versioned(data, self.m1))
+        self.assertEqual(response.status_code, 302)
+        self.assertMoved(self.m1, self.m2)
+
+
+class AdminStaleFormTests(TestCase):
+    """The LineMeeting admin change form carries the same stamp and refuses when stale."""
+
+    def setUp(self):
+        self.super_user = make_user("root@oxlip.test", is_superuser=True)
+        self.meeting = make_meeting(make_staff("person@oxlip.test"), meeting_date=date(2026, 1, 10))
+        LineMeeting.objects.filter(pk=self.meeting.pk).update(main_matters="Stored", updated_at=OLD_STAMP)
+        self.url = reverse("admin:line_management_linemeeting_change", args=[self.meeting.pk])
+        self.client.force_login(self.super_user)
+
+    def _data(self, version):
+        return {
+            "created_by_email": "",
+            "meeting_date": "2026-01-10",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Admin typed this",
+            "actions_from_meeting": "",
+            "meeting_version": version,
+            **management_form("agreed_actions"),
+            "_save": "Save",
+        }
+
+    def _stored(self):
+        return LineMeeting.objects.values_list("main_matters", flat=True).get(pk=self.meeting.pk)
+
+    # Catches a stale admin form overwriting a newer page save.
+    def test_stale_admin_form_is_refused_with_typed_text_kept(self):
+        v0 = meeting_version(LineMeeting.objects.get(pk=self.meeting.pk))
+        LineMeeting.objects.filter(pk=self.meeting.pk).update(
+            main_matters="Saved on the meeting page", updated_at=timezone.now()
+        )
+        response = self.client.post(self.url, self._data(v0))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "This meeting was changed after you opened this page")
+        self.assertContains(response, "Admin typed this")
+        self.assertEqual(self._stored(), "Saved on the meeting page")
+
+    # Catches the admin check refusing a fresh form (or a missing stamp being let through).
+    def test_fresh_admin_form_saves_and_missing_stamp_is_refused(self):
+        refused = self.client.post(self.url, self._data(""))
+        self.assertEqual(refused.status_code, 200)
+        self.assertEqual(self._stored(), "Stored")
+        fresh = meeting_version(LineMeeting.objects.get(pk=self.meeting.pk))
+        self.assertEqual(self.client.post(self.url, self._data(fresh)).status_code, 302)
+        self.assertEqual(self._stored(), "Admin typed this")
+
+
+class PreDeployCreatePageTests(TestCase):
+    """A create page opened before the deploy posts the old six-field shape."""
+
+    def setUp(self):
+        self.manager_user = make_user("boss@oxlip.test")
+        make_staff("boss@oxlip.test")
+        self.report = make_staff("report@oxlip.test", line_manager_email="boss@oxlip.test")
+        self.url = reverse("line_management:meeting_create", args=[self.report.pk])
+        self.carried_text = "Old carried text ✅ “done”"
+        self.agreed_text = "Old agreed text\r\nsecond line"
+        self.old_shape = {
+            "meeting_date": "2026-02-01",
+            "actions_from_last_meeting": self.carried_text,
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Old notes",
+            "actions_from_meeting": self.agreed_text,
+        }
+
+    # Catches an old-shape create silently dropping the legacy action prose (or creating a half record).
+    def test_old_shape_create_is_refused_and_both_legacy_action_texts_handed_back(self):
+        self.client.force_login(self.manager_user)
+        response = self.client.post(self.url, self.old_shape)
+        self.assertEqual(response.status_code, 409)
+        for text in (self.carried_text, self.agreed_text, "Old notes"):
+            self.assertContains(response, escape(text), status_code=409)
+        self.assertFalse(LineMeeting.objects.exists())
+        self.assertFalse(MeetingAction.objects.exists())
+
+    # Catches the old-shape hand-back being shown to someone who may not create at all.
+    def test_stranger_posting_old_shape_gets_403_not_the_handback(self):
+        stranger = make_user("stranger@oxlip.test")
+        make_staff("stranger@oxlip.test")
+        self.client.force_login(stranger)
+        response = self.client.post(self.url, self.old_shape)
+        self.assertEqual(response.status_code, 403)
+        self.assertNotContains(response, "Old notes", status_code=403)
+        self.assertFalse(LineMeeting.objects.exists())
+
+
+# --- Leg 2, round 2: regressions for the Lookout's admin findings and hand-back wording ---
+
+
+class _AdminActionFixture:
+    """m1 agreed ``self.action``; m2 reviews it and holds its rating and comment."""
+
+    def setUp(self):
+        self.super_user = make_user("root@oxlip.test", is_superuser=True)
+        person = make_staff("person@oxlip.test")
+        self.m1 = make_meeting(person, meeting_date=date(2026, 1, 10))
+        self.m2 = make_meeting(person, meeting_date=date(2026, 1, 20))
+        self.action = make_action(
+            self.m1, "Settled wording", reviewed_in=self.m2, rag="RED", comment="Blocked"
+        )
+        age_meetings(self.m1, self.m2)
+        self.client.force_login(self.super_user)
+
+
+class AdminInlineRatingReadOnlyTests(_AdminActionFixture, TestCase):
+    """C1: the rating belongs to the reviewing meeting; the agreeing meeting's admin
+    inline must not be able to write it."""
+
+    def _meeting_admin_post(self, version):
+        data = {
+            "created_by_email": "",
+            "meeting_date": "2026-01-10",
+            "actions_from_last_meeting": "",
+            "upcoming": "",
+            "rotation_update": "",
+            "main_matters": "Admin note on m1",
+            "actions_from_meeting": "",
+            "meeting_version": version,
+            **management_form("agreed_actions", 1, 1),
+            "agreed_actions-0-id": str(self.action.pk),
+            "agreed_actions-0-agreed_at": str(self.m1.pk),
+            "agreed_actions-0-description": "Settled wording",
+            # What a form opened before the rating was written would still post.
+            "agreed_actions-0-rag": "",
+            "agreed_actions-0-review_comment": "",
+            "_save": "Save",
+        }
+        url = reverse("admin:line_management_linemeeting_change", args=[self.m1.pk])
+        return self.client.post(url, data)
+
+    # Catches the meeting inline rendering editable rating/comment inputs.
+    def test_inline_renders_rating_and_comment_read_only(self):
+        url = reverse("admin:line_management_linemeeting_change", args=[self.m1.pk])
+        page = self.client.get(url)
+        self.assertEqual(page.status_code, 200)
+        self.assertNotContains(page, 'name="agreed_actions-0-rag"')
+        self.assertNotContains(page, 'name="agreed_actions-0-review_comment"')
+        self.assertContains(page, "Blocked")
+
+    # Catches a fresh meeting admin save wiping a rating written meanwhile on the reviewing meeting's page.
+    def test_meeting_admin_save_keeps_rating_written_on_reviewing_meeting_page(self):
+        m1_version = meeting_version(LineMeeting.objects.get(pk=self.m1.pk))
+        page = meeting_payload(meeting_date="2026-01-20")
+        page.update(carried_rows([(self.action, "GREEN", "Done \U0001f389\r\non the page")]))
+        saved = self.client.post(
+            reverse("line_management:meeting_save", args=[self.m2.pk]), versioned(page, self.m2)
+        )
+        self.assertEqual(saved.status_code, 302)
+
+        response = self._meeting_admin_post(m1_version)
+        self.assertEqual(response.status_code, 302, "m1's admin form should still be fresh")
+        action = MeetingAction.objects.get(pk=self.action.pk)
+        self.assertEqual((action.rag, action.review_comment), ("GREEN", "Done \U0001f389\r\non the page"))
+        self.assertEqual(
+            LineMeeting.objects.values_list("main_matters", flat=True).get(pk=self.m1.pk), "Admin note on m1"
+        )
+
+
+class MeetingActionChangeFormStaleTests(_AdminActionFixture, TestCase):
+    """C2: the standalone action admin form carries the action's stamp and refuses when stale."""
+
+    def setUp(self):
+        super().setUp()
+        self.url = reverse("admin:line_management_meetingaction_change", args=[self.action.pk])
+
+    def _post(self, version):
+        data = {"rag": "GREEN", "review_comment": "Admin comment", "_save": "Save"}
+        if version is not None:
+            data["action_version"] = version
+        return self.client.post(self.url, data)
+
+    def _stamp(self):
+        return MeetingAction.objects.get(pk=self.action.pk).updated_at.isoformat()
+
+    # Catches the action admin form not carrying the action's version at all.
+    def test_change_form_carries_hidden_action_version(self):
+        page = self.client.get(self.url)
+        tag = re.search(r'<input[^>]*name="action_version"[^>]*>', page.content.decode())
+        self.assertIsNotNone(tag, "no action_version input on the action admin form")
+        self.assertIn('type="hidden"', tag.group(0))
+        self.assertIn(f'value="{self._stamp()}"', tag.group(0))
+
+    # Catches a stale action admin form overwriting a rating/comment saved on the meeting page.
+    def test_stale_action_version_is_refused_and_db_unchanged(self):
+        v0 = self._stamp()
+        MeetingAction.objects.filter(pk=self.action.pk).update(
+            rag="AMBER", review_comment="Written on the page", updated_at=timezone.now()
+        )
+        before = snapshot(self.action)
+        response = self._post(v0)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "This action was changed after you opened this page")
+        self.assertContains(response, "Admin comment")
+        self.assertEqual(snapshot(self.action), before)
+
+    # Catches a missing stamp being treated as "skip the check".
+    def test_missing_action_version_is_refused_and_db_unchanged(self):
+        before = snapshot(self.action)
+        response = self._post(None)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "This action was changed after you opened this page")
+        self.assertEqual(snapshot(self.action), before)
+
+    # Catches the check refusing a fresh form, leaving the admin unable to correct a rating.
+    def test_fresh_action_version_saves(self):
+        response = self._post(self._stamp())
+        self.assertEqual(response.status_code, 302)
+        action = MeetingAction.objects.get(pk=self.action.pk)
+        self.assertEqual((action.rag, action.review_comment), ("GREEN", "Admin comment"))
+
+
+class HandbackWordingTests(_StalePageMixin, TestCase):
+    """What the refused-save page tells the user about each piece of handed-back text."""
+
+    # Catches an already-saved action row and a new typed row being labelled alike, so the
+    # user re-adds a saved action as a duplicate (or skips a new one).
+    def test_saved_and_new_action_rows_are_labelled_differently(self):
+        own = make_action(self.meeting, "Draft the rota")
+        payload = self.page("2000-01-01T00:00:00+00:00", main_matters="Stale notes")
+        payload.update(agreed_rows(existing=[(own, "Draft the rota by Friday", False)], new=["Brand new action"]))
+        response = self.client.post(self.save_url, payload)
+        self.assertEqual(response.status_code, 409)
+        self.assertContains(
+            response, "Action from this meeting 1 (already saved — check for changes)", status_code=409
+        )
+        self.assertContains(response, "New action from this meeting (row 2)", status_code=409)
+        self.assertContains(response, "Draft the rota by Friday", status_code=409)
+        self.assertContains(response, "Brand new action", status_code=409)
+
+    # Catches the back link replacing the hand-back page, so the typed text is gone once followed.
+    def test_back_link_opens_in_new_tab(self):
+        response = self.client.post(
+            self.save_url, self.page("2000-01-01T00:00:00+00:00", main_matters="Stale notes")
+        )
+        self.assertEqual(response.status_code, 409)
+        tag = re.search(r'<a[^>]*class="button"[^>]*>', response.content.decode())
+        self.assertIsNotNone(tag)
+        self.assertIn('target="_blank"', tag.group(0))
+        self.assertIn('rel="noopener"', tag.group(0))
+
+    # Catches a double-clicked Save showing "Meeting saved." twice.
+    def test_double_clicked_save_shows_saved_message_once(self):
+        payload = self.page(self.version(), main_matters="Clicked twice")
+        self.assertEqual(self.client.post(self.save_url, payload).status_code, 302)
+        response = self.client.post(self.save_url, payload, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode().count("Meeting saved."), 1)
+
+
+class PreDeployCreateLabelTests(TestCase):
+    """The old-shape create hand-back names each field in the user's terms."""
+
+    # Catches the legacy fields being handed back under raw field names.
+    def test_old_shape_handback_uses_readable_labels(self):
+        manager = make_user("boss@oxlip.test")
+        make_staff("boss@oxlip.test")
+        report = make_staff("report@oxlip.test", line_manager_email="boss@oxlip.test")
+        self.client.force_login(manager)
+        response = self.client.post(
+            reverse("line_management:meeting_create", args=[report.pk]),
+            {
+                "meeting_date": "2026-02-01",
+                "actions_from_last_meeting": "Old carried",
+                "upcoming": "",
+                "rotation_update": "",
+                "main_matters": "Old notes",
+                "actions_from_meeting": "Old agreed",
+            },
+        )
+        self.assertEqual(response.status_code, 409)
+        for label in ("Main matters to discuss", "Actions from the last meeting", "Actions from this meeting"):
+            self.assertContains(response, label, status_code=409)
+        self.assertNotContains(response, "Actions from last meeting<", status_code=409)

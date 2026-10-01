@@ -1,0 +1,39 @@
+{% comment %}
+Actions agreed at this meeting, one row each. Blank rows are ignored on save;
+three more appear after each save. Once an action has been carried into a later
+meeting its wording is settled and it cannot be removed.
+Expects: agreed_formset, meeting (None when new), can_edit.
+{% endcomment %}
+<div class="reflection-card">
+  <div class="reflection-card-header">Actions from this meeting</div>
+  <div class="reflection-card-body">
+    {{ agreed_formset.management_form }}
+    {% if can_edit %}
+      <p class="muted">What / by whom / by when — one action per box. Blank boxes are ignored; save to add more.</p>
+    {% endif %}
+    {% for f in agreed_formset %}
+      <div class="meeting-action{% if not f.instance.pk %} meeting-action--blank{% endif %}">
+        {{ f.id }}
+        <div class="field-row">
+          <label for="{{ f.description.id_for_label }}">{% if f.instance.pk %}Action {{ forloop.counter }}{% else %}Add an action{% endif %}</label>
+          {{ f.description }}
+        </div>
+        {% if f.instance.is_pinned %}
+          <p class="muted">Reviewed at the meeting of {{ f.instance.reviewed_in.meeting_date|date:"j M Y" }}</p>
+        {% elif f.instance.pk and f.DELETE %}
+          <label class="check-row meeting-action-remove">{{ f.DELETE }} <span class="check-row-text">Remove this action when I save</span></label>
+        {% endif %}
+      </div>
+    {% empty %}
+      <p class="muted">No actions were recorded at this meeting.</p>
+    {% endfor %}
+
+    {% if meeting and meeting.actions_from_meeting.strip %}
+      <div class="legacy-notes">
+        <span class="field-label">Recorded as notes</span>
+        <p class="muted">Written before actions were listed separately. Read-only.</p>
+        <p>{{ meeting.actions_from_meeting|linebreaksbr }}</p>
+      </div>
+    {% endif %}
+  </div>
+</div>

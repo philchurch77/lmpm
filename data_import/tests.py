@@ -1333,3 +1333,37 @@ class CoachEmailSnapshotOnReimportTests(TestCase):
 
         appraisal = Appraisal.objects.get(teacher=self.teacher, academic_year=self.year)
         self.assertEqual(appraisal.coach_email, "first.coach@x.test")
+
+
+class LineMeetingImportVersionTests(TestCase):
+    """Leg 2 of the line-meeting chart: an import update is a writer too, so it
+    must advance the meeting's version or an open meeting page saves over it."""
+
+    def setUp(self):
+        self.super_user = make_user("admin@oxlip.test", is_superuser=True)
+        self.client.force_login(self.super_user)
+        self.staff = make_staff("report@oxlip.test")
+
+    def _upload_and_confirm(self):
+        upload_and_get_batch(
+            self.client,
+            "line-meetings",
+            make_csv("staff_email,meeting_date,main_matters", "report@oxlip.test,2026-01-15,Discussed timetable."),
+        )
+        batch = ImportBatch.objects.filter(import_type=ImportType.LINE_MEETINGS).latest("uploaded_at")
+        confirm_batch(batch)
+        return batch
+
+    # Catches the import UPDATE path (a bulk .update(), bypassing auto_now) leaving updated_at alone.
+    def test_import_update_on_hash_match_advances_updated_at(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        self._upload_and_confirm()
+        meeting = LineMeeting.objects.get(staff=self.staff)
+        old = datetime(2020, 1, 1, 9, 0, 0, tzinfo=dt_timezone.utc)
+        LineMeeting.objects.filter(pk=meeting.pk).update(updated_at=old)
+
+        batch = self._upload_and_confirm()
+        self.assertEqual(batch.rows.get(row_number=1).outcome, ImportRow.Outcome.UPDATE)
+        self.assertEqual(LineMeeting.objects.filter(staff=self.staff).count(), 1)
+        self.assertNotEqual(LineMeeting.objects.get(pk=meeting.pk).updated_at, old)

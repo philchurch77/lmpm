@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from django.shortcuts import render
 
-# Posted keys that carry no user-typed prose: CSRF, formset bookkeeping, and the
-# hidden primary keys that formsets round-trip.
-_SKIP_EXACT = {"csrfmiddlewaretoken"}
+# Posted keys that carry no user-typed prose: CSRF, the line-meeting version
+# stamp, formset bookkeeping, and the hidden primary keys that formsets round-trip.
+_SKIP_EXACT = {"csrfmiddlewaretoken", "meeting_version"}
 _SKIP_SUFFIXES = (
     "-TOTAL_FORMS",
     "-INITIAL_FORMS",
@@ -30,6 +30,7 @@ _SKIP_SUFFIXES = (
     "-MAX_NUM_FORMS",
     "-id",
     "-DELETE",
+    "-agreed_at",  # line-meeting inline formset's hidden parent key
 )
 
 # Everything non-empty is shown. An earlier version skipped values shorter than
@@ -51,12 +52,14 @@ def _humanise(key: str) -> str:
     return field
 
 
-def submitted_text(post) -> list[tuple[str, str]]:
+def submitted_text(post, labels=None) -> list[tuple[str, str]]:
     """The user's typed prose from a POST, as ``(label, value)`` pairs.
 
     Ordering follows the form, so the result reads down the page the way the
-    user wrote it.
+    user wrote it. ``labels`` optionally maps a posted key to a readable label;
+    the *values* shown are always the raw submitted ones.
     """
+    labels = labels or {}
     out = []
     for key in post:
         if key in _SKIP_EXACT or key.endswith(_SKIP_SUFFIXES):
@@ -64,19 +67,23 @@ def submitted_text(post) -> list[tuple[str, str]]:
         value = (post.get(key) or "").strip()
         if not value:
             continue
-        out.append((_humanise(key), value))
+        out.append((labels.get(key) or _humanise(key), value))
     return out
 
 
-def render_save_blocked(request, *, heading, explanation, back_url, back_label):
-    """Render the user's submitted text back to them after a refused save."""
+def render_save_blocked(request, *, heading, explanation, back_url, back_label, labels=None):
+    """Render the user's submitted text back to them after a refused save.
+
+    A caller passing ``labels`` built from the record must only do so for a
+    viewer who still holds a role on it (see the module docstring).
+    """
     return render(
         request,
         "core/save_blocked.html",
         {
             "heading": heading,
             "explanation": explanation,
-            "submitted": submitted_text(request.POST),
+            "submitted": submitted_text(request.POST, labels),
             "back_url": back_url,
             "back_label": back_label,
         },

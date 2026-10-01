@@ -32,7 +32,7 @@ from django.urls import reverse
 from allauth.core.exceptions import ImmediateHttpResponse
 
 from appraisals.models import AcademicYear, Appraisal, Goal, SelfReview, SelfReviewItem
-from line_management.models import LineMeeting
+from line_management.models import LineMeeting, MeetingAction
 
 from .allauth_adapters import RestrictMicrosoftLoginAdapter
 from .recovery import submitted_text
@@ -1320,7 +1320,7 @@ class SuperuserOnlyDeleteTests(TestCase):
     """
 
     # Registered in appraisals/admin.py and line_management/admin.py.
-    GATED_MODELS = (Appraisal, Goal, SelfReview, SelfReviewItem, LineMeeting)
+    GATED_MODELS = (Appraisal, Goal, SelfReview, SelfReviewItem, LineMeeting, MeetingAction)
 
     def setUp(self):
         from django.contrib import admin as django_admin
@@ -1483,4 +1483,50 @@ class TemplateCommentSyntaxTests(SimpleTestCase):
             "Multi-line {# #} comments render as visible page text. "
             "Use {% comment %}...{% endcomment %} instead. Found at: "
             + ", ".join(offenders),
+        )
+
+
+class SubmittedTextLabelsAndMeetingKeysTests(TestCase):
+    """Leg 2 of the line-meeting chart added ``labels=`` and two skipped keys to
+    ``submitted_text``; the appraisal hand-back must be unchanged by it."""
+
+    # Catches the labels parameter changing what an appraisal hand-back shows.
+    def test_appraisal_shaped_post_gives_same_pairs_with_labels_none(self):
+        post = post_data(
+            [
+                ("csrfmiddlewaretoken", "a" * 64),
+                ("items-TOTAL_FORMS", "2"),
+                ("items-INITIAL_FORMS", "2"),
+                ("items-0-id", "4471"),
+                ("items-0-evidence", "Book scrutiny in November."),
+                ("bullets-0-id", "9"),
+                ("bullets-0-score", "3"),
+                ("summary_teacher_comment", "A strong year — “mostly”."),
+                ("signed_name", "AB"),
+            ]
+        )
+        expected = [
+            ("Evidence (row 1)", "Book scrutiny in November."),
+            ("Score (row 1)", "3"),
+            ("Summary teacher comment", "A strong year — “mostly”."),
+            ("Signed name", "AB"),
+        ]
+        self.assertEqual(submitted_text(post), expected)
+        self.assertEqual(submitted_text(post, labels=None), expected)
+        self.assertEqual(submitted_text(post, labels={}), expected)
+
+    # Catches the line-meeting version stamp or the inline parent key being echoed as typed text.
+    def test_meeting_version_and_agreed_at_keys_are_skipped(self):
+        post = post_data(
+            [
+                ("meeting_version", "2026-03-01T12:00:00.123456+00:00"),
+                ("agreed-0-agreed_at", "17"),
+                ("agreed-0-id", "42"),
+                ("agreed-0-description", "Book the room"),
+            ]
+        )
+        self.assertEqual(submitted_text(post), [("Description (row 1)", "Book the room")])
+        self.assertEqual(
+            submitted_text(post, labels={"agreed-0-description": "Action from this meeting (row 1)"}),
+            [("Action from this meeting (row 1)", "Book the room")],
         )
