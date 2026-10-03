@@ -5,17 +5,17 @@ meeting its wording is settled and it cannot be removed.
 Expects: agreed_formset, meeting (None when new), can_edit.
 {% endcomment %}
 <div class="reflection-card">
-  <div class="reflection-card-header">Actions from this meeting</div>
+  <div class="reflection-card-header" id="agreed-actions-heading">Actions from this meeting</div>
   <div class="reflection-card-body">
     {{ agreed_formset.management_form }}
     {% if can_edit %}
-      <p class="muted">What / by whom / by when — one action per box. Blank boxes are ignored; save to add more.</p>
+      <p class="muted">What / by whom / by when — one action per box. Blank boxes are ignored; save to add more. {% if meeting.is_held %}Each action comes up at the next meeting for a RAG rating.{% else %}Once this meeting is marked as held, each action appears at the next meeting for a RAG rating.{% endif %}</p>
     {% endif %}
     {% for f in agreed_formset %}
       <div class="meeting-action{% if not f.instance.pk %} meeting-action--blank{% endif %}">
         {{ f.id }}
         <div class="field-row">
-          <label for="{{ f.description.id_for_label }}">{% if f.instance.pk %}Action {{ forloop.counter }}{% else %}Add an action{% endif %}</label>
+          <label for="{{ f.description.id_for_label }}">{% if f.instance.pk %}Action {{ forloop.counter }}{% else %}New action {{ forloop.counter }}{% endif %}</label>
           {{ f.description }}
         </div>
         {% if f.instance.is_pinned %}

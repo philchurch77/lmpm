@@ -1287,12 +1287,16 @@ class ActionLossTests(TestCase):
         pinned.refresh_from_db()
         self.assertEqual((pinned.reviewed_in_id, pinned.rag, pinned.review_comment), (m2.pk, "RED", "Blocked"))
 
-    # Catches blank "Add an action" rows on an older meeting, whose actions would never be reviewed.
+    # Catches blank "New action" rows on an older meeting, whose actions would never be reviewed.
     def test_non_latest_meeting_renders_no_blank_add_action_rows(self):
-        make_meeting(self.report, meeting_date=date(2026, 1, 20))
+        latest = make_meeting(self.report, meeting_date=date(2026, 1, 20))
         old = self.client.get(reverse("line_management:meeting_detail", args=[self.m1.pk]))
         self.assertEqual(old.context["agreed_formset"].extra_forms, [])
-        self.assertNotContains(old, "Add an action")
+        self.assertNotContains(old, ">New action ")
+        # The label being asserted absent above is really the blank-row label.
+        self.assertContains(
+            self.client.get(reverse("line_management:meeting_detail", args=[latest.pk])), ">New action "
+        )
 
     # Catches action text or a review comment changing across save, reload and re-save.
     def test_action_text_round_trips_emoji_crlf_and_curly_quotes(self):
@@ -3331,3 +3335,182 @@ class ReportPrepareWorkflowTests(_Leg4Mixin, TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, escape(edited))
         assert_stored()
+
+
+# ---------------------------------------------------------------------------
+# Meeting-page guidance polish: the "Review actions from the last meeting" card's
+# empty states, the bullet helper (data-bullets / bullets-hint / bullets.js) offered
+# only on boxes the viewer can type in, and the dated "already being prepared" message.
+# No access path changed; Gauntlet stage 3 is pinned by
+# ManagedStaffChokepointTests.test_non_manager_gets_403_on_meeting_new and
+# MeetingRoleMatrixTests.test_unrelated_user_gets_403_on_view.
+# ---------------------------------------------------------------------------
+
+from django.utils.formats import date_format  # noqa: E402
+
+
+def textareas(html):
+    """Map each rendered <textarea>'s id to its opening-tag attribute string."""
+    found = {}
+    for match in re.finditer(r"<textarea\b([^>]*)>", html):
+        attrs = match.group(1)
+        id_match = re.search(r'\bid="([^"]*)"', attrs)
+        if id_match:
+            found[id_match.group(1)] = attrs
+    return found
+
+
+def attr_value(attrs, name):
+    match = re.search(rf'\b{re.escape(name)}="([^"]*)"', attrs)
+    return match.group(1) if match else None
+
+
+def has_bullets(attrs):
+    return re.search(r"\bdata-bullets\b", attrs) is not None
+
+
+class MeetingPageGuidanceTests(_Leg3Mixin, TestCase):
+    """The carried-actions card explains itself, and the bullet helper reaches only
+    boxes the viewer can actually edit."""
+
+    def setUp(self):
+        super().setUp()
+        self.new_url = reverse("line_management:meeting_new", args=[self.report.pk])
+
+    def held_source(self, **fields):
+        meeting = make_meeting(self.report, meeting_date=date(2026, 1, 15), created_by_email=self.manager_email)
+        if fields:
+            LineMeeting.objects.filter(pk=meeting.pk).update(**fields)
+        return meeting
+
+    def detail_url(self, meeting):
+        return reverse("line_management:meeting_detail", args=[meeting.pk])
+
+    def messages_of(self, response):
+        return [str(m) for m in response.context["messages"]]
+
+    # Catches a first meeting showing an empty "review" card that reads as a broken text box.
+    def test_first_meeting_card_explains_there_is_nothing_to_review_yet(self):
+        response = self.client.get(self.new_url)
+        self.assertEqual(response.status_code, 200)
+        for text in (
+            "Review actions from the last meeting",
+            "Actions agreed at the previous meeting appear here",
+            "Nothing to review yet",
+            "This is the first meeting recorded here",
+        ):
+            self.assertContains(response, text)
+
+    # Catches the empty-state message showing alongside real actions waiting to be rated.
+    def test_unreviewed_action_is_listed_without_a_nothing_to_review_message(self):
+        make_action(self.held_source(), "Draft the Year 9 scheme")
+        response = self.client.get(self.new_url)
+        self.assertContains(response, "Draft the Year 9 scheme")
+        self.assertContains(response, "Actions agreed at the previous meeting appear here")
+        self.assertNotContains(response, "Nothing to review")
+
+    # Catches a manager with a Held history being told this is the first meeting.
+    def test_held_source_without_actions_is_not_called_the_first_meeting(self):
+        self.held_source()
+        response = self.client.get(self.new_url)
+        self.assertContains(response, "Nothing to review at this meeting")
+        self.assertNotContains(response, "This is the first meeting recorded here")
+
+    # Catches a Held meeting telling its manager "once this meeting is marked as held",
+    # which reads as if the hold had not taken.
+    def test_held_meeting_guidance_does_not_ask_for_it_to_be_held(self):
+        held = self.held_source()
+        self.assertTrue(held.is_held)
+        response = self.client.get(self.detail_url(held))
+        self.assertContains(response, "Each action comes up at the next meeting for a RAG rating.")
+        self.assertNotContains(response, "marked as held, each action")
+        self.assertNotContains(response, "once this meeting is marked as held")
+        preparing = self.client.get(self.new_url)
+        self.assertContains(preparing, "Once this meeting is marked as held, each action")
+
+    # Catches legacy action prose disappearing, or being offered as if it could be rated.
+    def test_legacy_action_prose_is_shown_and_marked_unratable(self):
+        self.held_source(actions_from_meeting="Old-style action written as prose")
+        response = self.client.get(self.new_url)
+        self.assertContains(response, "Old-style action written as prose")
+        self.assertContains(response, "can’t be given a RAG rating")
+        self.assertNotContains(response, "Nothing to review")
+
+    # Catches a read-only viewer being told to rate or add, or handed the bullet helper.
+    def test_read_only_report_gets_no_edit_instructions_or_bullet_helper(self):
+        meeting = self.held_source(main_matters="Held notes")
+        self.client.force_login(self.report_user)
+        response = self.client.get(self.detail_url(meeting))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No actions were carried forward to this meeting.")
+        for text in ("rate Red, Amber or Green with a comment", "Nothing to review", "bullets-hint",
+                     "data-bullets", "core/bullets.js"):
+            self.assertNotContains(response, text)
+
+    # Catches the bullet helper or its hint missing from an editable box, or the
+    # shared hint being repeated on every action row (screen-reader noise).
+    def test_manager_page_offers_bullets_on_every_editable_box_with_the_right_hints(self):
+        make_action(self.held_source(), "Carried action")
+        response = self.client.get(self.new_url)
+        boxes = textareas(response.content.decode())
+        for box_id in ("id_upcoming", "id_rotation_update", "id_main_matters",
+                       "id_agreed-0-description", "id_carried-0-review_comment"):
+            self.assertIn(box_id, boxes)
+            self.assertTrue(has_bullets(boxes[box_id]), box_id)
+        self.assertEqual(attr_value(boxes["id_upcoming"], "aria-describedby"), "upcoming-hint bullets-hint")
+        self.assertEqual(
+            attr_value(boxes["id_rotation_update"], "aria-describedby"), "rotation-guidance bullets-hint"
+        )
+        self.assertIn("bullets-hint", attr_value(boxes["id_main_matters"], "aria-describedby").split())
+        self.assertNotIn("bullets-hint", attr_value(boxes["id_agreed-0-description"], "aria-describedby") or "")
+        self.assertEqual(attr_value(boxes["id_carried-0-review_comment"], "aria-describedby"), "carried-0-text")
+        self.assertEqual(response.content.decode().count('id="bullets-hint"'), 1)
+        self.assertContains(response, "core/bullets.js")
+
+    # Catches the bullet helper being attached to the Rotation update the report may not write.
+    def test_report_preparing_gets_bullets_on_their_fields_but_not_rotation_update(self):
+        self.client.force_login(self.report_user)
+        response = self.client.get(reverse("line_management:prepare_new"))
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        boxes = textareas(html)
+        self.assertNotIn("id_rotation_update", boxes)
+        self.assertNotIn('id="id_rotation_update"', html)
+        for box_id in ("id_upcoming", "id_main_matters"):
+            self.assertTrue(has_bullets(boxes[box_id]), box_id)
+
+    # Catches the bullet helper being offered on a settled (pinned) action's wording.
+    def test_pinned_action_description_is_disabled_and_has_no_bullets(self):
+        older = self.held_source()
+        later = make_meeting(self.report, meeting_date=date(2026, 2, 1), created_by_email=self.manager_email)
+        make_action(older, "Settled wording", reviewed_in=later, rag="GREEN")
+        response = self.client.get(self.detail_url(older))
+        self.assertEqual(response.status_code, 200)
+        box = textareas(response.content.decode())["id_agreed-0-description"]
+        self.assertContains(response, "Settled wording")
+        self.assertRegex(box, r"\bdisabled\b")
+        self.assertFalse(has_bullets(box))
+
+    # Catches the "already being prepared" redirect leaving the user unsure which meeting opened.
+    def test_already_preparing_message_names_the_meeting_date(self):
+        meeting = self.preparing(meeting_date=date(2026, 10, 3))
+        expected_date = date_format(meeting.meeting_date, "j M Y")
+
+        response = self.client.get(self.new_url, follow=True)
+        self.assertEqual(response.redirect_chain[-1][0], self.detail_url(meeting))
+        [message] = self.messages_of(response)
+        self.assertIn(expected_date, message)
+        self.assertIn("Save and mark as held", message)
+
+        self.client.force_login(self.report_user)
+        response = self.client.get(reverse("line_management:prepare_new"), follow=True)
+        self.assertEqual(response.redirect_chain[-1][0], self.detail_url(meeting))
+        [message] = self.messages_of(response)
+        self.assertIn(expected_date, message)
+        self.assertIn("marks it as held", message)
+
+    # Catches bullets.js breaking the house rule: assigning .value can rewrite stored text.
+    def test_bullets_js_never_assigns_textarea_value(self):
+        source = (settings.BASE_DIR / "core" / "static" / "core" / "bullets.js").read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"\.value\s*=(?!=)", source))
+        self.assertIn("execCommand", source)

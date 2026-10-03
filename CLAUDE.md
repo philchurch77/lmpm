@@ -471,8 +471,9 @@ prepared / Held" and "The report prepares their meeting".
   (`RED`/`AMBER`/`GREEN`, blank = not rated) and `review_comment`. Both FKs are `PROTECT`: deleting
   meeting N must not destroy the ratings written at N+1. DB check constraints forbid reviewing an
   action in the meeting that agreed it, and a rating/comment on an action not yet carried forward.
-  **A pinned action is settled**: its wording is disabled and it cannot be deleted (the formset drops
-  `DELETE` and `_should_delete_form` refuses a crafted one).
+  **A pinned action is settled**: its wording is disabled and it cannot be deleted (the formset removes
+  the `DELETE` field from pinned rows, so a crafted one is never read, and `delete_existing` /
+  `save_existing` compare-and-swap on `reviewed_in IS NULL`, so one pinned mid-save rolls the page back).
 - **Carry-forward is pinned, not derived** (`line_management/services.py`): `start_meeting` pins the
   unreviewed actions of the report's latest **Held** meeting (`carry_forward_source`: by
   `meeting_date`, then `created_at`, then pk) in the create transaction, with a compare-and-swap
@@ -583,18 +584,24 @@ prepared / Held" and "The report prepares their meeting".
   form error. The double-submit guard (`services.find_repeat_submission`) folds a create only when the
   notes, the agreed actions **and** the carried ratings all repeat exactly — the old notes-only guard
   would have merged two genuine same-day meetings that held only actions.
+- **Bullets**: `core/static/core/bullets.js` (loaded by `meeting_detail.html` only when `can_edit`)
+  continues a "- " list on Enter and ends it on an empty "- " line. Opt-in via `data-bullets`, set
+  by `forms._offer_bullets` *after* the disable logic, so only boxes the viewer can type in are
+  marked. Text stays plain; nothing is stored differently.
 - **Nav**: `line_management/context_processors.py` exposes `user_is_line_manager` so
-  `core/.../base.html` shows "My Reports" only to line managers; "My Line Meetings" shows for
-  everyone.
+  `core/.../base.html` shows "My Team" to line managers (and to coaches, via the appraisals flag);
+  "My Line Meetings" shows for everyone.
 
 ### Operational prerequisites
 The report needs a matching Django `User` (same email, for SSO) and a `StaffMember`; their
 `line_manager_email` must point at the manager's email for the manager to gain access.
 
 ### Known follow-ups
-- `line_management/tests.py` has a 34-test suite covering the role matrix (report/manager/super/
-  stranger), the manager-change inheritance rule, case-insensitive email matching, the two-section
-  `my_meetings` view, the create-on-save / empty-save-guard flow, and `is_empty` / the purge command.
+- `line_management/tests.py` covers the role matrix (report/manager/super/stranger), the
+  manager-change inheritance rule, case-insensitive email matching, the two-section `my_meetings`
+  view, the create-on-save / empty-save-guard flow, `is_empty` / the purge command, actions and
+  carry-forward, the version check, Being prepared / Held, and the report's preparing scope
+  (including mutation-checked guards for the allowlist, the hold gate and the `as_report` filter).
   `appraisals/tests.py` has its own suite (see "Appraisals app" → "Known follow-ups" above);
   `core/tests.py` covers the SSO auth gate and the `check_readiness` audit command.
 - Any pre-existing blank records from the old "create-then-fill" flow can be cleared with
@@ -744,6 +751,9 @@ bearing for that claim; each was written to close a defect that had actually shi
   in the *surviving* text. Setting `.value` in script fires no `input` event, so `unsaved_changes.js`
   never saw it and never warned. **Never reintroduce a client-side truncation.** The limit is guidance;
   every narrative field is an unbounded `TextField` and there is no server-side cap to match.
+  A helper may *insert* only at the caret, in direct response to the user's own keystroke, through
+  the browser's undo-aware path (`execCommand`, or `setRangeText` + a dispatched `input` event) —
+  never on load, never by assigning `.value` (see `bullets.js`).
   (The cap was 300 words from the initial commit until 2026-08-28, applied to every appraisal textarea —
   only `line_management` opted out via `data-max-words="0"` — so historic imported text may already
   have been truncated in production during that window.)
@@ -796,8 +806,9 @@ bearing for that claim; each was written to close a defect that had actually shi
 carries `LineMeeting.updated_at` as a hidden `meeting_version` stamp, and `services.save_meeting_page`
 is one conditional UPDATE on it — a stale, missing or malformed stamp writes nothing and returns the
 409 hand-back (`core/recovery.py`, with readable section labels). The ordering is load-bearing:
-`get_meeting_or_403` → `can_edit_meeting` 403 → version 409, so the hand-back is never shown to someone
-who has lost access. **Every write that changes what a meeting page may edit must advance that
+`get_meeting_or_403` (403) → `edit_scope` (403 for no edit rights; the report on their own Held meeting
+gets the 409 hand-back instead) → version 409, so the hand-back is never shown to someone who has lost
+access. **Every write that changes what a meeting page may edit must advance that
 meeting's `updated_at`**: a page save, pinning its actions into the next meeting (`start_meeting`
 touches the source first — meeting row before action rows, for lock order), admin action edits
 (`touch_meetings`), and the importer's `.update()`. Save tests must post a current stamp (the

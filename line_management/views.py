@@ -25,6 +25,7 @@ from django.db import IntegrityError, OperationalError, transaction
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.formats import date_format
 from django.views.decorators.http import require_POST
 
 from core.identity import current_staff_member
@@ -254,7 +255,7 @@ class _Starter:
     start: str
     listing: str
     listing_label: str
-    already_preparing: str  # info message when one is already being prepared
+    already_preparing: str  # info message when one is already being prepared; {date} is its date
     preparing_conflict: str  # explanation on the "already being prepared" hand-back
     back_dated: str  # date error format; {date} is the last held meeting
 
@@ -266,8 +267,9 @@ def _manager_start(member):
         listing=reverse("line_management:staff_meetings", args=[member.pk]),
         listing_label="Open this person's meetings",
         already_preparing=(
-            "A meeting is already being prepared for this person, so it has been opened "
-            "instead of a new one."
+            "The meeting of {date} is still being prepared, so it has been opened instead of a "
+            "new one. Once it has taken place, use “Save and mark as held”: its actions then "
+            "carry forward to the next meeting for a RAG rating."
         ),
         preparing_conflict="A meeting for this person is already being prepared — possibly by "
         "you, in another tab or window",
@@ -285,7 +287,11 @@ def _report_start():
         start=reverse("line_management:prepare_new"),
         listing=reverse("line_management:my_meetings"),
         listing_label="Open your meetings",
-        already_preparing="Your next meeting is already being prepared, so it has been opened.",
+        already_preparing=(
+            "Your meeting of {date} is already being prepared, so it has been opened. Your "
+            "line manager marks it as held once it has taken place; its actions then come up "
+            "for a RAG rating at the next meeting."
+        ),
         preparing_conflict="Your next meeting is already being prepared — by you in another "
         "tab or window, or by your line manager",
         back_dated=(
@@ -368,7 +374,9 @@ def _new(request, member, role, starter):
     preparing = preparing_meeting(member)
     if preparing is not None:
         # At most one meeting per person is being prepared; carry on with it.
-        messages.info(request, starter.already_preparing)
+        messages.info(
+            request, starter.already_preparing.format(date=date_format(preparing.meeting_date, "j M Y"))
+        )
         return redirect("line_management:meeting_detail", pk=preparing.pk)
     source = carry_forward_source(member)
     meeting = LineMeeting(staff=member, meeting_date=timezone.localdate())

@@ -3,4 +3,5 @@
 - [Line-meeting actions leg 1 review](pattern_line_meeting_actions_leg1.md) — MeetingAction/pinning design; findings raised so they are not re-raised blindly
 - [Line-meeting hold/state leg 3 review](pattern_line_meeting_hold_leg3.md) — PREPARING/HELD design; findings raised, shared helpers' homes
 - [Line-meeting report prepares leg 4 review](pattern_line_meeting_report_leg4.md) — edit_scope/_StartUrls/shared _create; findings raised
+- [Line-meeting polish + bullets.js review](pattern_line_meeting_polish_bullets.md) — RAG guidance copy, "- " helper; Low findings only
 - [Line-meeting version token leg 2 review](pattern_line_meeting_version_token_leg2.md) — updated_at CAS design; what was verified and what was raised

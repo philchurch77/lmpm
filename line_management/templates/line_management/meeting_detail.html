@@ -1,4 +1,5 @@
 {% extends "core/base.html" %}
+{% load static %}
 
 {% block title %}{% if is_report_preparing %}Prepare your next line meeting{% elif is_new %}New line meeting{% else %}Line meeting{% endif %} — {{ member.email }}{% endblock %}
 
@@ -43,14 +44,16 @@
       <div class="reflection-card-header">Upcoming events / tasks / actions</div>
       <div class="reflection-card-body">
         <div class="field-row">
-          <label for="{{ form.upcoming.id_for_label }}">What / where / who / by when — diary dates and deadlines (agreed actions go in "Actions from this meeting")</label>
+          <label for="{{ form.upcoming.id_for_label }}">What / where / who / by when</label>
+          <p class="muted" id="upcoming-hint">Diary dates and deadlines.{% if can_edit %} Anything to follow up and rate next time belongs in <a href="#agreed-actions-heading">Actions from this meeting</a>.{% endif %}</p>
           {{ form.upcoming }}
+          {% if can_edit %}<p class="muted" id="bullets-hint">Tip: type a dash and a space (“- ”), then press Enter to keep adding bullets. Press Enter on an empty bullet to finish. Works in every notes box.</p>{% endif %}
         </div>
       </div>
     </div>
 
     <div class="reflection-card">
-      <div class="reflection-card-header">Rotation update</div>
+      <div class="reflection-card-header" id="rotation-heading">Rotation update</div>
       <div class="reflection-card-body">
         <div class="field-row">
           {% if is_report_preparing %}
@@ -65,7 +68,7 @@
               <p class="muted">Your line manager will complete this at the meeting.</p>
             {% endif %}
           {% else %}
-            <label for="{{ form.rotation_update.id_for_label }}">{{ rotation_guidance }}</label>
+            <p class="muted" id="rotation-guidance">{{ rotation_guidance }}</p>
             {{ form.rotation_update }}
           {% endif %}
         </div>
@@ -98,4 +101,8 @@
       {% endif %}
     {% endif %}
   </form>
+{% endblock %}
+
+{% block scripts %}
+  {% if can_edit %}<script defer src="{% static 'core/bullets.js' %}?v=20261003-1"></script>{% endif %}
 {% endblock %}

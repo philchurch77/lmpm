@@ -92,10 +92,7 @@ class LineMeetingForm(forms.ModelForm):
         widgets = {
             "meeting_date": forms.DateInput(attrs={"type": "date"}),
             "upcoming": forms.Textarea(attrs={"rows": 4, "data-max-words": "0"}),
-            # Named by its card header, like Main matters, so the title is not shown twice.
-            "rotation_update": forms.Textarea(
-                attrs={"rows": 4, "data-max-words": "0", "aria-labelledby": "rotation-heading"}
-            ),
+            "rotation_update": forms.Textarea(attrs={"rows": 4, "data-max-words": "0"}),
             "main_matters": forms.Textarea(
                 attrs={"rows": 4, "data-max-words": "0", "aria-labelledby": "main-matters-heading"}
             ),

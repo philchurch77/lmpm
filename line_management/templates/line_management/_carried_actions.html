@@ -5,12 +5,24 @@ agreed at). Legacy prose recorded before actions were rows is shown read-only
 and is never on any form, so no save can change it.
 Each rating group and comment is named by its action's text (id "<prefix>-text")
 so a screen reader can tell the rows apart.
-Expects: carried_formset, meeting (None when new), source (new meetings only).
+For anyone who can edit, the intro line is always shown: on a first meeting the
+card is otherwise empty, and an empty card read as a broken text box. With
+nothing to rate, the card says why — "first meeting" only on a new page with no
+held meeting at all (no meeting, no source; a new page is only ever shown to an
+editor); otherwise a general message that stays true for a saved first meeting
+reopened later (no source is kept for a saved meeting, so the template cannot
+tell the two apart). Read-only viewers get a neutral line, never an instruction
+to rate or add. "Not yet marked as held" is never offered as a reason here: an
+unheld previous meeting is being prepared, and starting a new one reopens it.
+Expects: carried_formset, meeting (None when new), source (new meetings only), can_edit.
 {% endcomment %}
 <div class="reflection-card">
-  <div class="reflection-card-header">Actions from the last meeting</div>
+  <div class="reflection-card-header">Review actions from the last meeting</div>
   <div class="reflection-card-body">
     {{ carried_formset.management_form }}
+    {% if can_edit %}
+      <p class="muted">Actions agreed at the previous meeting appear here, to rate Red, Amber or Green with a comment. New actions go in <a href="#agreed-actions-heading">Actions from this meeting</a>.</p>
+    {% endif %}
     {% if typed_ratings %}
       <div class="field-errors" role="alert">
         <p><strong>What you typed on the page you submitted (not saved):</strong></p>
@@ -43,17 +55,27 @@ Expects: carried_formset, meeting (None when new), source (new meetings only).
     {% if meeting and meeting.actions_from_last_meeting.strip %}
       <div class="legacy-notes">
         <span class="field-label">Recorded as notes</span>
-        <p class="muted">Written before actions were listed separately. Read-only.</p>
+        <p class="muted">Written before actions were listed separately, so they can’t be given a RAG rating. Read-only.</p>
         <p>{{ meeting.actions_from_last_meeting|linebreaksbr }}</p>
       </div>
     {% elif not meeting and source and source.actions_from_meeting.strip %}
       <div class="legacy-notes">
         <span class="field-label">Actions recorded as notes at the meeting of {{ source.meeting_date|date:"j M Y" }}</span>
-        <p class="muted">Written before actions were listed separately. Read-only.</p>
+        <p class="muted">Written before actions were listed separately, so they can’t be given a RAG rating. Read-only.</p>
         <p>{{ source.actions_from_meeting|linebreaksbr }}</p>
       </div>
+    {% elif not meeting and not source %}
+      <div class="legacy-notes">
+        <span class="field-label">Nothing to review yet</span>
+        <p>This is the first meeting recorded here. Actions you agree in <a href="#agreed-actions-heading">Actions from this meeting</a> will appear here at the next meeting for a RAG rating, once this meeting is marked as held.</p>
+      </div>
+    {% elif not carried_formset.forms and can_edit %}
+      <div class="legacy-notes">
+        <span class="field-label">Nothing to review at this meeting</span>
+        <p>No actions from a previous meeting need review. Actions you agree in <a href="#agreed-actions-heading">Actions from this meeting</a> will come up for a RAG rating at the next meeting{% if not meeting.is_held %}, once this meeting is marked as held{% endif %}.</p>
+      </div>
     {% elif not carried_formset.forms %}
-      <p class="muted">No actions were carried forward from the last meeting.</p>
+      <p class="muted">No actions were carried forward to this meeting.</p>
     {% endif %}
   </div>
 </div>

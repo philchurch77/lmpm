@@ -1,2 +1,3 @@
 - [Support-staff Goals/Summary variant](project_support_staff_variant.md) — owner_is_support flag, UPR field removed not hidden, Goal 1 reword via command not migration
 - [Line-meeting RAG + report pre-fill chart](project_line_meeting_collab_chart.md) — MeetingAction pinned reviewed_in, PREPARING/HELD, NOTE_FIELDS frozen, 4 legs; leg-1 source rule + column-owned saves; leg-2 version token/CAS/lock order; leg-3 hold-in-save button, repeat guard kept, import CAS; leg-4 edit_scope, report allowlist, pk-less prepare URLs, report-on-Held 409
+- [Line-meeting guidance polish](project_line_meeting_guidance_polish.md) — empty-state 2 variants (not-held is never the reason), dated already_preparing msg, opt-in bullets.js on meeting page only
